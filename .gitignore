@@ -18,7 +18,3 @@ target/
 *.pdb
 
 # End of https://www.toptal.com/developers/gitignore/api/rust
-.claude/
-.agents/
-skills-lock.json
-tasks/
