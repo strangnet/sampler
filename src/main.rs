@@ -4,26 +4,28 @@ mod source_picker;
 mod waveform;
 
 use std::cell::Cell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    App, Application, Bounds, Context, Div, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful, Task, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, Div, FocusHandle, FontWeight, KeyBinding, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful,
+    Task, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 
 use audio::{
     AudioBufferState, AudioPlayer, AudioRecorder, AudioSource, CHANNELS, RunningAppInfo,
-    SAMPLE_RATE, extract_slice, list_running_apps, quick_save_wav, save_wav_with_options,
-    slice_frame_range,
+    SAMPLE_RATE, extract_slice, list_running_apps, quick_save_dir, quick_save_wav,
+    save_wav_with_options, slice_frame_range,
 };
 use controls::{ButtonTone, format_duration, level_meter, styled_button};
 use source_picker::{reconcile_selected_source, render_source_dropdown};
 use waveform::{WAVEFORM_PAD_X, waveform_canvas};
+
+actions!(sampler, [Quit, CloseWindow]);
 
 #[derive(Clone, Copy)]
 enum Action {
@@ -48,6 +50,33 @@ fn file_name_or_default(path: &Path) -> &str {
     path.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("sample.wav")
+}
+
+fn default_save_directory() -> PathBuf {
+    if let Ok(sampler_dir) = quick_save_dir() {
+        if sampler_dir.is_dir() {
+            return sampler_dir;
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let home_path = PathBuf::from(home);
+        let music_dir = home_path.join("Music");
+        if music_dir.is_dir() {
+            return music_dir;
+        }
+        if home_path.is_dir() {
+            return home_path;
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn ensure_wav_extension(path: PathBuf) -> PathBuf {
+    if path.extension().is_none() {
+        path.with_extension("wav")
+    } else {
+        path
+    }
 }
 
 fn quick_save_status(path: &Path) -> String {
@@ -460,20 +489,52 @@ impl SamplerApp {
         let Some(slice) = self.prepare_export_slice(cx) else {
             return;
         };
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Save Audio Sample")
-            .add_filter("WAV Audio", &["wav"])
-            .set_file_name("sample.wav")
-            .save_file()
-        else {
-            return;
-        };
 
         let normalize = self.normalize_export;
-        self.start_save_task(cx, move || {
-            save_wav_with_options(&path, &slice, normalize)?;
-            Ok(format!("Saved WAV to {}", file_name_or_default(&path)))
+        let prompt = cx.prompt_for_new_path(&default_save_directory(), Some("sample.wav"));
+        self.is_saving = true;
+        self.set_status("Choose WAV destination…", cx);
+
+        let task = cx.spawn(async move |this, cx| {
+            let path = match prompt.await {
+                Ok(Ok(Some(path))) => ensure_wav_extension(path),
+                Ok(Ok(None)) | Err(_) => {
+                    let _ = this.update(cx, |app, cx| {
+                        app.is_saving = false;
+                        app.set_status("Save cancelled", cx);
+                    });
+                    return;
+                }
+                Ok(Err(err)) => {
+                    let _ = this.update(cx, |app, cx| {
+                        app.is_saving = false;
+                        app.set_status(format!("Save dialog failed: {err}"), cx);
+                    });
+                    return;
+                }
+            };
+
+            let _ = this.update(cx, |app, cx| {
+                app.set_status("Saving WAV…", cx);
+            });
+
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    save_wav_with_options(&path, &slice, normalize)?;
+                    Ok::<String, String>(format!("Saved WAV to {}", file_name_or_default(&path)))
+                })
+                .await;
+
+            let _ = this.update(cx, |app, cx| {
+                app.is_saving = false;
+                let msg = match result {
+                    Ok(m) | Err(m) => m,
+                };
+                app.set_status(msg, cx);
+            });
         });
+        self._save_task = Some(task);
     }
 
     fn dispatch_action(&mut self, action: Action, cx: &mut Context<Self>) {
@@ -707,6 +768,9 @@ impl Render for SamplerApp {
             .flex_col()
             .size_full()
             .track_focus(&self.focus_handle)
+            .on_action(|_: &CloseWindow, window, _| {
+                window.remove_window();
+            })
             .bg(rgb(0x111217))
             .text_color(rgb(0xe5e7eb))
             .p(px(20.0))
@@ -736,6 +800,18 @@ impl Render for SamplerApp {
 fn main() {
     Application::new().run(|cx: &mut App| {
         cx.activate(true);
+
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-w", CloseWindow, None),
+        ]);
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
 
         let bounds = Bounds::centered(None, size(px(960.0), px(520.0)), cx);
         cx.open_window(
@@ -769,5 +845,21 @@ mod tests {
         assert!((pixel_x_to_norm(bounds, 224.0) - 1.0).abs() < 1e-6);
         assert!((pixel_x_to_norm(bounds, 0.0) - 0.0).abs() < 1e-6);
         assert!((pixel_x_to_norm(bounds, 500.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ensure_wav_extension_appends_wav_when_missing() {
+        assert_eq!(
+            ensure_wav_extension(PathBuf::from("/tmp/my_sample")),
+            PathBuf::from("/tmp/my_sample.wav")
+        );
+        assert_eq!(
+            ensure_wav_extension(PathBuf::from("/tmp/my_sample.wav")),
+            PathBuf::from("/tmp/my_sample.wav")
+        );
+        assert_eq!(
+            ensure_wav_extension(PathBuf::from("/tmp/my_sample.aiff")),
+            PathBuf::from("/tmp/my_sample.aiff")
+        );
     }
 }
