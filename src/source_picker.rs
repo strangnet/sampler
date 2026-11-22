@@ -37,8 +37,11 @@ fn source_dropdown_item(
     subtitle: impl Into<SharedString>,
     is_selected: bool,
 ) -> Stateful<Div> {
+    let title = title.into();
+    let selector_title = title.clone();
     div()
         .id(id)
+        .debug_selector(move || format!("source:{selector_title}"))
         .w_full()
         .min_w_0()
         .px(px(10.0))
@@ -74,7 +77,7 @@ fn source_dropdown_item(
                     rgb(0xe5e7eb)
                 })
                 .truncate()
-                .child(title.into()),
+                .child(title),
         )
         .child(
             div()

@@ -150,6 +150,7 @@ fn pill_btn(id: &'static str, enabled: bool, active: bool, text_hex: u32) -> Sta
     };
     pill_badge(0.0, 5.0, bg, text)
         .id(id)
+        .debug_selector(move || id.to_string())
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -243,6 +244,21 @@ impl SamplerApp {
     /// The status line shown under the controls.
     pub fn status(&self) -> &str {
         &self.status_message
+    }
+
+    /// Length of the Recording in seconds.
+    pub fn recording_secs(&self) -> f64 {
+        self.audio_snapshot().0
+    }
+
+    /// The Selection, normalized to the Recording (0.0 = start, 1.0 = end).
+    pub fn selection(&self) -> Option<(f32, f32)> {
+        self.selection
+    }
+
+    /// The chosen audio source, as labelled in the source picker.
+    pub fn source_label(&self) -> String {
+        self.selected_source.label()
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -781,11 +797,13 @@ impl SamplerApp {
         ];
         let row = |specs: &[ButtonSpec], cx: &mut Context<Self>| {
             hstack(8.0).children(specs.iter().map(|&(id, label, enabled, tone, action)| {
-                styled_button(id, label, enabled, tone).when(enabled, |el| {
-                    el.on_click(
-                        cx.listener(move |this, _ev, _w, cx| this.dispatch_action(action, cx)),
-                    )
-                })
+                styled_button(id, label, enabled, tone)
+                    .debug_selector(move || id.to_string())
+                    .when(enabled, |el| {
+                        el.on_click(
+                            cx.listener(move |this, _ev, _w, cx| this.dispatch_action(action, cx)),
+                        )
+                    })
             }))
         };
         let status = xs_label(0x9ca3af)
@@ -860,14 +878,19 @@ impl Render for SamplerApp {
                     t.start_waveform_drag(f32::from(ev.position.x), cx)
                 }),
             )
-            .child(waveform_canvas(
-                self.shared_audio.clone(),
-                is_recording,
-                self.selection,
-                highlighted_handle,
-                self.player.playhead_position(),
-                self.waveform_bounds.clone(),
-            ))
+            .child(
+                div()
+                    .size_full()
+                    .debug_selector(|| "waveform".to_string())
+                    .child(waveform_canvas(
+                        self.shared_audio.clone(),
+                        is_recording,
+                        self.selection,
+                        highlighted_handle,
+                        self.player.playhead_position(),
+                        self.waveform_bounds.clone(),
+                    )),
+            )
             .when(!has_audio && !is_recording, |el| {
                 el.child(
                     div()
