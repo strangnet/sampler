@@ -191,11 +191,26 @@ impl SelectionDrag {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     const W: f32 = 1000.0;
+    const SEL: Option<Selection> = Some((0.2, 0.6));
 
     fn at(x: f32) -> WaveformPos {
         WaveformPos { x, width: W }
+    }
+
+    /// Pixel `n` on a 1024 px waveform: every whole pixel is exact in f32,
+    /// so tests can land exactly on a threshold.
+    fn x_px(n: f32) -> f32 {
+        n / 1024.0
+    }
+
+    fn at_px(n: f32) -> WaveformPos {
+        WaveformPos {
+            x: x_px(n),
+            width: 1024.0,
+        }
     }
 
     #[track_caller]
@@ -208,156 +223,338 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hit_test_grabs_handles_within_six_pixels() {
-        let sel = Some((0.2, 0.6));
-        assert_eq!(hit_test(sel, at(0.2)), SelectionHit::Handle(Handle::Start));
-        assert_eq!(
-            hit_test(sel, at(0.195)),
-            SelectionHit::Handle(Handle::Start)
-        );
-        assert_eq!(
-            hit_test(sel, at(0.205)),
-            SelectionHit::Handle(Handle::Start)
-        );
-        assert_eq!(hit_test(sel, at(0.595)), SelectionHit::Handle(Handle::End));
-        assert_eq!(hit_test(sel, at(0.605)), SelectionHit::Handle(Handle::End));
-        assert_eq!(hit_test(sel, at(0.193)), SelectionHit::Outside);
-        assert_eq!(hit_test(sel, at(0.4)), SelectionHit::Inside);
-        assert_eq!(hit_test(sel, at(0.9)), SelectionHit::Outside);
-        assert_eq!(hit_test(None, at(0.4)), SelectionHit::Outside);
+    #[rstest]
+    #[case::on_the_start_handle(0.2, SelectionHit::Handle(Handle::Start))]
+    #[case::five_px_before_the_start_handle(0.195, SelectionHit::Handle(Handle::Start))]
+    #[case::five_px_after_the_start_handle(0.205, SelectionHit::Handle(Handle::Start))]
+    #[case::five_px_before_the_end_handle(0.595, SelectionHit::Handle(Handle::End))]
+    #[case::five_px_after_the_end_handle(0.605, SelectionHit::Handle(Handle::End))]
+    #[case::seven_px_before_the_start_handle(0.193, SelectionHit::Outside)]
+    #[case::between_the_handles(0.4, SelectionHit::Inside)]
+    #[case::past_the_end_handle(0.9, SelectionHit::Outside)]
+    fn a_press_is_classified_by_where_it_lands(#[case] x: f32, #[case] expected: SelectionHit) {
+        // When
+        let hit = hit_test(SEL, at(x));
+
+        // Then
+        assert_eq!(hit, expected);
     }
 
     #[test]
-    fn hit_test_small_selection_picks_nearer_handle_and_cannot_be_moved() {
-        // 10 px wide: both grab zones cover the whole inside.
-        let sel = Some((0.5, 0.51));
-        assert_eq!(
-            hit_test(sel, at(0.503)),
-            SelectionHit::Handle(Handle::Start)
-        );
-        assert_eq!(hit_test(sel, at(0.507)), SelectionHit::Handle(Handle::End));
-        assert_eq!(
-            hit_test(sel, at(0.498)),
-            SelectionHit::Handle(Handle::Start)
-        );
-        assert_eq!(hit_test(sel, at(0.512)), SelectionHit::Handle(Handle::End));
+    fn without_a_selection_every_press_is_outside() {
+        // When
+        let hit = hit_test(None, at(0.4));
+
+        // Then
+        assert_eq!(hit, SelectionHit::Outside);
     }
 
     #[test]
-    fn dragging_a_handle_resizes_and_flips_past_the_other_handle() {
-        let mut drag = SelectionDrag::begin(Some((0.2, 0.6)), at(0.6));
-        assert_eq!(drag.update(0.7), Some((0.2, 0.7)));
-        // Past the start handle: the dragged handle becomes the start.
-        assert_eq!(drag.update(0.1), Some((0.1, 0.2)));
-        assert_eq!(drag.finish(0.1), Some((0.1, 0.2)));
+    fn a_press_exactly_six_pixels_from_a_handle_grabs_it() {
+        // Given
+        let selection = Some((x_px(256.0), x_px(512.0)));
 
-        let drag = SelectionDrag::begin(Some((0.2, 0.6)), at(0.2));
-        assert_eq!(drag.finish(0.8), Some((0.6, 0.8)));
+        // When
+        let hit = hit_test(selection, at_px(262.0));
+
+        // Then
+        assert_eq!(hit, SelectionHit::Handle(Handle::Start));
+    }
+
+    // 10 px wide: both grab zones cover the whole inside, so it cannot be moved.
+    #[rstest]
+    #[case::inside_near_the_start(0.503, Handle::Start)]
+    #[case::inside_near_the_end(0.507, Handle::End)]
+    #[case::just_before_the_start(0.498, Handle::Start)]
+    #[case::just_past_the_end(0.512, Handle::End)]
+    fn a_narrow_selection_is_grabbed_by_its_nearer_handle(
+        #[case] x: f32,
+        #[case] expected: Handle,
+    ) {
+        // Given
+        let selection = Some((0.5, 0.51));
+
+        // When
+        let hit = hit_test(selection, at(x));
+
+        // Then
+        assert_eq!(hit, SelectionHit::Handle(expected));
     }
 
     #[test]
-    fn dragging_inside_moves_at_same_length_and_stops_at_recording_ends() {
-        let mut drag = SelectionDrag::begin(Some((0.2, 0.4)), at(0.3));
-        assert_eq!(drag.update(0.35), Some((0.25, 0.45)));
-        assert_eq!(drag.update(0.95), Some((0.8, 1.0)));
-        assert_eq!(drag.update(-0.5), Some((0.0, 0.2)));
-        assert_eq!(drag.finish(0.4), Some((0.3, 0.5)));
+    fn a_press_midway_between_close_handles_grabs_the_start_handle() {
+        // Given
+        let selection = Some((x_px(500.0), x_px(510.0)));
+
+        // When
+        let hit = hit_test(selection, at_px(505.0));
+
+        // Then
+        assert_eq!(hit, SelectionHit::Handle(Handle::Start));
+    }
+
+    #[rstest]
+    #[case::the_start_handle(SEL, 0.2, DragKind::Resize)]
+    #[case::the_end_handle(SEL, 0.6, DragKind::Resize)]
+    #[case::inside_the_selection(SEL, 0.4, DragKind::Move)]
+    #[case::outside_the_selection(SEL, 0.9, DragKind::Create)]
+    #[case::with_no_selection(None, 0.4, DragKind::Create)]
+    fn the_drag_kind_follows_what_was_pressed(
+        #[case] selection: Option<Selection>,
+        #[case] press: f32,
+        #[case] expected: DragKind,
+    ) {
+        // When
+        let drag = SelectionDrag::begin(selection, at(press));
+
+        // Then
+        assert_eq!(drag.kind(), expected);
     }
 
     #[test]
-    fn a_still_press_clears_the_selection_anywhere() {
-        let sel = Some((0.2, 0.6));
-        for press in [0.2, 0.4, 0.6, 0.9] {
-            let drag = SelectionDrag::begin(sel, at(press));
-            assert_eq!(drag.finish(press), None, "press at {press}");
-        }
-        assert_eq!(SelectionDrag::begin(None, at(0.5)).finish(0.5), None);
+    fn dragging_a_handle_resizes_the_selection() {
+        // Given
+        let mut drag = SelectionDrag::begin(SEL, at(0.6));
+
+        // When
+        let selection = drag.update(0.7);
+
+        // Then
+        assert_sel(selection, (0.2, 0.7));
     }
 
-    #[test]
-    fn a_short_drag_outside_the_selection_counts_as_a_click() {
-        let drag = SelectionDrag::begin(Some((0.2, 0.6)), at(0.9));
-        assert_eq!(drag.finish(0.903), None);
+    #[rstest]
+    #[case::the_end_handle_past_the_start(0.6, 0.1, (0.1, 0.2))]
+    #[case::the_start_handle_past_the_end(0.2, 0.8, (0.6, 0.8))]
+    fn a_handle_dragged_past_the_other_flips_them(
+        #[case] press: f32,
+        #[case] release: f32,
+        #[case] expected: Selection,
+    ) {
+        // Given
+        let drag = SelectionDrag::begin(SEL, at(press));
+
+        // When
+        let selection = drag.finish(release);
+
+        // Then
+        assert_sel(selection, expected);
     }
 
-    #[test]
-    fn small_nudges_on_a_handle_or_inside_the_selection_apply() {
-        let sel = Some((0.2, 0.6));
-        assert_sel(
-            SelectionDrag::begin(sel, at(0.6)).finish(0.602),
-            (0.2, 0.602),
-        );
-        assert_sel(
-            SelectionDrag::begin(sel, at(0.4)).finish(0.402),
-            (0.202, 0.602),
-        );
+    #[rstest]
+    #[case::from_its_initial_side(0.6, Handle::End)]
+    #[case::across_the_other_handle(0.1, Handle::Start)]
+    #[case::past_the_end_of_the_recording(1.5, Handle::End)]
+    fn the_dragged_handle_follows_the_pointer(#[case] pointer: f32, #[case] expected: Handle) {
+        // Given
+        let mut drag = SelectionDrag::begin(SEL, at(0.6));
+
+        // When
+        drag.update(pointer);
+
+        // Then
+        assert_eq!(drag.dragged_handle(), Some(expected));
+    }
+
+    #[rstest]
+    #[case::when_moving(0.4)]
+    #[case::when_creating(0.9)]
+    fn only_a_resize_has_a_dragged_handle(#[case] press: f32) {
+        // When
+        let drag = SelectionDrag::begin(SEL, at(press));
+
+        // Then
+        assert_eq!(drag.dragged_handle(), None);
+    }
+
+    #[rstest]
+    #[case::towards_the_end(0.705, (0.2, 0.7))]
+    #[case::across_the_start_handle(0.105, (0.1, 0.2))]
+    fn a_handle_grabbed_off_centre_keeps_its_offset_from_the_pointer(
+        #[case] pointer: f32,
+        #[case] expected: Selection,
+    ) {
+        // Given: pressed 5 px right of the end handle
+        let mut drag = SelectionDrag::begin(SEL, at(0.605));
+
+        // When
+        let selection = drag.update(pointer);
+
+        // Then
+        assert_sel(selection, expected);
+    }
+
+    #[rstest]
+    #[case::past_the_end(1.4, (0.2, 1.0))]
+    #[case::past_the_start(-0.3, (0.0, 0.2))]
+    fn resizing_past_either_end_of_the_recording_stops_at_the_end(
+        #[case] pointer: f32,
+        #[case] expected: Selection,
+    ) {
+        // Given
+        let mut drag = SelectionDrag::begin(SEL, at(0.6));
+
+        // When
+        let selection = drag.update(pointer);
+
+        // Then
+        assert_sel(selection, expected);
     }
 
     #[test]
     fn a_resize_that_ends_under_four_pixels_wide_removes_the_selection() {
-        let drag = SelectionDrag::begin(Some((0.2, 0.6)), at(0.6));
-        assert_eq!(drag.finish(0.203), None);
+        // Given
+        let drag = SelectionDrag::begin(SEL, at(0.6));
+
+        // When
+        let selection = drag.finish(0.203);
+
+        // Then
+        assert_eq!(selection, None);
     }
 
     #[test]
-    fn dragging_outside_creates_a_new_selection() {
-        let mut drag = SelectionDrag::begin(Some((0.2, 0.4)), at(0.8));
-        assert_eq!(drag.update(0.9), Some((0.8, 0.9)));
-        assert_eq!(drag.finish(0.7), Some((0.7, 0.8)));
+    fn a_resize_that_ends_exactly_four_pixels_wide_keeps_the_selection() {
+        // Given
+        let drag = SelectionDrag::begin(Some((x_px(256.0), x_px(512.0))), at_px(512.0));
+
+        // When
+        let selection = drag.finish(x_px(260.0));
+
+        // Then
+        assert_eq!(selection, Some((x_px(256.0), x_px(260.0))));
     }
 
     #[test]
-    fn drag_kind_follows_what_was_pressed() {
-        let sel = Some((0.2, 0.6));
-        assert_eq!(SelectionDrag::begin(sel, at(0.2)).kind(), DragKind::Resize);
-        assert_eq!(SelectionDrag::begin(sel, at(0.6)).kind(), DragKind::Resize);
-        assert_eq!(SelectionDrag::begin(sel, at(0.4)).kind(), DragKind::Move);
-        assert_eq!(SelectionDrag::begin(sel, at(0.9)).kind(), DragKind::Create);
-        assert_eq!(SelectionDrag::begin(None, at(0.4)).kind(), DragKind::Create);
+    fn dragging_inside_moves_the_selection_at_the_same_length() {
+        // Given
+        let drag = SelectionDrag::begin(Some((0.2, 0.4)), at(0.3));
+
+        // When
+        let selection = drag.finish(0.4);
+
+        // Then
+        assert_sel(selection, (0.3, 0.5));
+    }
+
+    #[rstest]
+    #[case::at_the_end(0.95, (0.8, 1.0))]
+    #[case::at_the_start(-0.5, (0.0, 0.2))]
+    fn a_moved_selection_stops_at_the_recording_ends(
+        #[case] pointer: f32,
+        #[case] expected: Selection,
+    ) {
+        // Given
+        let mut drag = SelectionDrag::begin(Some((0.2, 0.4)), at(0.3));
+
+        // When
+        let selection = drag.update(pointer);
+
+        // Then
+        assert_sel(selection, expected);
+    }
+
+    #[rstest]
+    #[case::on_the_end_handle(0.6, 0.602, (0.2, 0.602))]
+    #[case::inside_the_selection(0.4, 0.402, (0.202, 0.602))]
+    fn a_small_nudge_on_the_selection_applies(
+        #[case] press: f32,
+        #[case] release: f32,
+        #[case] expected: Selection,
+    ) {
+        // Given
+        let drag = SelectionDrag::begin(SEL, at(press));
+
+        // When
+        let selection = drag.finish(release);
+
+        // Then
+        assert_sel(selection, expected);
+    }
+
+    #[rstest]
+    #[case::on_the_start_handle(SEL, 0.2)]
+    #[case::inside_the_selection(SEL, 0.4)]
+    #[case::on_the_end_handle(SEL, 0.6)]
+    #[case::outside_the_selection(SEL, 0.9)]
+    #[case::with_no_selection(None, 0.5)]
+    fn a_still_press_clears_the_selection(
+        #[case] selection: Option<Selection>,
+        #[case] press: f32,
+    ) {
+        // Given
+        let drag = SelectionDrag::begin(selection, at(press));
+
+        // When
+        let selection = drag.finish(press);
+
+        // Then
+        assert_eq!(selection, None);
+    }
+
+    #[test]
+    fn a_short_drag_outside_the_selection_counts_as_a_click() {
+        // Given
+        let drag = SelectionDrag::begin(SEL, at(0.9));
+
+        // When
+        let selection = drag.finish(0.903);
+
+        // Then
+        assert_eq!(selection, None);
+    }
+
+    #[test]
+    fn exactly_four_pixels_of_travel_creates_a_selection() {
+        // Given
+        let drag = SelectionDrag::begin(None, at_px(500.0));
+
+        // When
+        let selection = drag.finish(x_px(504.0));
+
+        // Then
+        assert_eq!(selection, Some((x_px(500.0), x_px(504.0))));
     }
 
     #[test]
     fn dragging_away_and_back_near_the_press_point_is_not_a_click() {
+        // Given
         let mut drag = SelectionDrag::begin(Some((0.2, 0.4)), at(0.3));
         drag.update(0.5);
-        assert_sel(drag.finish(0.302), (0.202, 0.402));
+
+        // When
+        let selection = drag.finish(0.302);
+
+        // Then
+        assert_sel(selection, (0.202, 0.402));
     }
 
-    #[test]
-    fn grabbing_a_handle_off_centre_moves_it_by_the_pointer_offset_without_jumping() {
-        // Pressed 5 px right of the end handle.
-        let mut drag = SelectionDrag::begin(Some((0.2, 0.6)), at(0.605));
-        assert_sel(drag.update(0.705), (0.2, 0.7));
-        assert_sel(drag.update(0.105), (0.1, 0.2));
-    }
+    #[rstest]
+    #[case::rightwards(0.9, (0.8, 0.9))]
+    #[case::leftwards(0.7, (0.7, 0.8))]
+    fn dragging_outside_creates_a_new_selection_from_the_press_point(
+        #[case] release: f32,
+        #[case] expected: Selection,
+    ) {
+        // Given
+        let drag = SelectionDrag::begin(Some((0.2, 0.4)), at(0.8));
 
-    #[test]
-    fn dragged_handle_tracks_flips_and_is_none_unless_resizing() {
-        let sel = Some((0.2, 0.6));
-        let mut drag = SelectionDrag::begin(sel, at(0.6));
-        assert_eq!(drag.dragged_handle(), Some(Handle::End));
-        drag.update(0.1);
-        assert_eq!(drag.dragged_handle(), Some(Handle::Start));
-        drag.update(1.5);
-        assert_eq!(drag.dragged_handle(), Some(Handle::End));
+        // When
+        let selection = drag.finish(release);
 
-        assert_eq!(SelectionDrag::begin(sel, at(0.4)).dragged_handle(), None);
-        assert_eq!(SelectionDrag::begin(sel, at(0.9)).dragged_handle(), None);
-    }
-
-    #[test]
-    fn resizing_past_either_end_of_the_recording_stops_at_the_end() {
-        let mut drag = SelectionDrag::begin(Some((0.2, 0.6)), at(0.6));
-        assert_sel(drag.update(1.4), (0.2, 1.0));
-        assert_sel(drag.update(-0.3), (0.0, 0.2));
-        assert_sel(drag.finish(1.4), (0.2, 1.0));
+        // Then
+        assert_sel(selection, expected);
     }
 
     #[test]
     fn creating_from_the_padding_before_the_recording_starts_at_zero() {
-        // 3 px into the left padding, before the Recording starts.
+        // Given: 3 px into the left padding, before the Recording starts
         let drag = SelectionDrag::begin(None, at(-0.003));
-        assert_sel(drag.finish(0.1), (0.0, 0.1));
+
+        // When
+        let selection = drag.finish(0.1);
+
+        // Then
+        assert_sel(selection, (0.0, 0.1));
     }
 }

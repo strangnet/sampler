@@ -115,12 +115,19 @@ pub fn level_meter(meter_pct: f32) -> impl gpui::IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn format_duration_formats_minutes_seconds_tenths() {
-        assert_eq!(format_duration(0.0), "00:00.0");
-        assert_eq!(format_duration(-1.0), "00:00.0");
-        assert_eq!(format_duration(2.4), "00:02.4");
-        assert_eq!(format_duration(65.35), "01:05.3");
+    #[rstest]
+    #[case::zero(0.0, "00:00.0")]
+    #[case::a_negative_duration_shows_as_zero(-1.0, "00:00.0")]
+    #[case::seconds_and_tenths(2.4, "00:02.4")]
+    #[case::minutes(65.0, "01:05.0")]
+    #[case::hundredths_are_truncated(65.35, "01:05.3")]
+    fn a_duration_shows_as_minutes_seconds_and_tenths(#[case] secs: f64, #[case] expected: &str) {
+        // When
+        let shown = format_duration(secs);
+
+        // Then
+        assert_eq!(shown, expected);
     }
 }

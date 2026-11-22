@@ -182,72 +182,53 @@ pub fn render_source_dropdown<T: 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn reconcile_selected_source_preserves_matching_app_and_resets_missing() {
-        let apps = vec![
-            RunningAppInfo {
-                pid: 101,
-                name: "Music".to_string(),
-                bundle_id: "com.apple.Music".to_string(),
-            },
-            RunningAppInfo {
-                pid: 202,
-                name: "Safari".to_string(),
-                bundle_id: "com.apple.Safari".to_string(),
-            },
-        ];
-
-        assert_eq!(
-            reconcile_selected_source(&AudioSource::AllSystemAudio, &apps),
-            (AudioSource::AllSystemAudio, false)
-        );
-
-        // Matches by PID
-        let music = AudioSource::Application(apps[0].clone());
-        assert_eq!(
-            reconcile_selected_source(&music, &apps),
-            (music.clone(), false)
-        );
-
-        // Falls back to bundle_id when PID changed
-        let relaunched_safari = AudioSource::Application(RunningAppInfo {
-            pid: 999,
-            name: "Safari".to_string(),
-            bundle_id: "com.apple.Safari".to_string(),
-        });
-        assert_eq!(
-            reconcile_selected_source(&relaunched_safari, &apps),
-            (AudioSource::Application(apps[1].clone()), false)
-        );
-
-        // Resets to AllSystemAudio if app is gone
-        let missing = AudioSource::Application(RunningAppInfo {
-            pid: 303,
-            name: "Spotify".to_string(),
-            bundle_id: "com.spotify.client".to_string(),
-        });
-        assert_eq!(
-            reconcile_selected_source(&missing, &apps),
-            (AudioSource::AllSystemAudio, true)
-        );
+    fn app(pid: i32, name: &str, bundle_id: &str) -> RunningAppInfo {
+        RunningAppInfo {
+            pid,
+            name: name.to_string(),
+            bundle_id: bundle_id.to_string(),
+        }
     }
 
-    #[test]
-    fn reconcile_selected_source_does_not_match_empty_bundle_id() {
-        let apps = vec![RunningAppInfo {
-            pid: 101,
-            name: "Helper".to_string(),
-            bundle_id: String::new(),
-        }];
-        let missing = AudioSource::Application(RunningAppInfo {
-            pid: 999,
-            name: "OtherHelper".to_string(),
-            bundle_id: String::new(),
-        });
-        assert_eq!(
-            reconcile_selected_source(&missing, &apps),
-            (AudioSource::AllSystemAudio, true)
-        );
+    fn running() -> Vec<RunningAppInfo> {
+        vec![
+            app(101, "Music", "com.apple.Music"),
+            app(202, "Safari", "com.apple.Safari"),
+            app(303, "Helper", ""),
+        ]
+    }
+
+    #[rstest]
+    #[case::all_system_audio_stays(
+        AudioSource::AllSystemAudio,
+        (AudioSource::AllSystemAudio, false)
+    )]
+    #[case::a_running_app_stays(
+        AudioSource::Application(app(101, "Music", "com.apple.Music")),
+        (AudioSource::Application(app(101, "Music", "com.apple.Music")), false)
+    )]
+    #[case::a_relaunched_app_is_found_by_bundle_id(
+        AudioSource::Application(app(999, "Safari", "com.apple.Safari")),
+        (AudioSource::Application(app(202, "Safari", "com.apple.Safari")), false)
+    )]
+    #[case::a_closed_app_falls_back_to_all_system_audio(
+        AudioSource::Application(app(404, "Spotify", "com.spotify.client")),
+        (AudioSource::AllSystemAudio, true)
+    )]
+    #[case::an_empty_bundle_id_never_matches(
+        AudioSource::Application(app(999, "OtherHelper", "")),
+        (AudioSource::AllSystemAudio, true)
+    )]
+    fn the_selected_source_is_reconciled_with_the_running_apps(
+        #[case] selected: AudioSource,
+        #[case] expected: (AudioSource, bool),
+    ) {
+        // When
+        let reconciled = reconcile_selected_source(&selected, &running());
+
+        // Then
+        assert_eq!(reconciled, expected);
     }
 }

@@ -914,35 +914,66 @@ fn main() {
 mod tests {
     use super::*;
     use gpui::point;
+    use rstest::rstest;
 
-    #[test]
-    fn pixel_x_to_waveform_pos_accounts_for_padding_without_clamping() {
-        let bounds = Bounds {
+    /// A 208 px waveform at x = 20: 200 px drawn between 4 px of padding.
+    fn waveform_bounds() -> Bounds<Pixels> {
+        Bounds {
             origin: point(px(20.0), px(80.0)),
             size: size(px(208.0), px(200.0)),
-        };
-        let x = |px_x| pixel_x_to_waveform_pos(bounds, px_x).x;
-        assert_eq!(pixel_x_to_waveform_pos(bounds, 24.0).width, 200.0);
-        assert!((x(24.0) - 0.0).abs() < 1e-6);
-        assert!((x(124.0) - 0.5).abs() < 1e-6);
-        assert!((x(224.0) - 1.0).abs() < 1e-6);
-        assert!((x(4.0) - -0.1).abs() < 1e-6);
-        assert!((x(264.0) - 1.2).abs() < 1e-6);
+        }
+    }
+
+    #[rstest]
+    #[case::the_start_of_the_recording(24.0, 0.0)]
+    #[case::the_middle(124.0, 0.5)]
+    #[case::the_end_of_the_recording(224.0, 1.0)]
+    #[case::left_of_the_recording_unclamped(4.0, -0.1)]
+    #[case::right_of_the_recording_unclamped(264.0, 1.2)]
+    fn a_window_x_maps_onto_the_drawn_waveform(#[case] window_x: f32, #[case] expected: f32) {
+        // When
+        let pos = pixel_x_to_waveform_pos(waveform_bounds(), window_x);
+
+        // Then
+        assert!((pos.x - expected).abs() < 1e-6, "{} != {expected}", pos.x);
     }
 
     #[test]
-    fn ensure_wav_extension_appends_wav_when_missing() {
-        assert_eq!(
-            ensure_wav_extension(PathBuf::from("/tmp/my_sample")),
-            PathBuf::from("/tmp/my_sample.wav")
-        );
-        assert_eq!(
-            ensure_wav_extension(PathBuf::from("/tmp/my_sample.wav")),
-            PathBuf::from("/tmp/my_sample.wav")
-        );
-        assert_eq!(
-            ensure_wav_extension(PathBuf::from("/tmp/my_sample.aiff")),
-            PathBuf::from("/tmp/my_sample.aiff")
-        );
+    fn the_drawn_waveform_excludes_the_padding() {
+        // When
+        let pos = pixel_x_to_waveform_pos(waveform_bounds(), 24.0);
+
+        // Then
+        assert_eq!(pos.width, 200.0);
+    }
+
+    #[test]
+    fn a_waveform_narrower_than_its_padding_counts_as_one_pixel_wide() {
+        // Given
+        let bounds = Bounds {
+            origin: point(px(20.0), px(80.0)),
+            size: size(px(6.0), px(200.0)),
+        };
+
+        // When
+        let pos = pixel_x_to_waveform_pos(bounds, 24.0);
+
+        // Then
+        assert_eq!(pos.width, 1.0);
+    }
+
+    #[rstest]
+    #[case::appended_when_missing("/tmp/my_sample", "/tmp/my_sample.wav")]
+    #[case::kept_when_already_wav("/tmp/my_sample.wav", "/tmp/my_sample.wav")]
+    #[case::kept_when_another_format("/tmp/my_sample.aiff", "/tmp/my_sample.aiff")]
+    fn a_save_path_gets_a_wav_extension_only_when_it_has_none(
+        #[case] chosen: &str,
+        #[case] expected: &str,
+    ) {
+        // When
+        let path = ensure_wav_extension(PathBuf::from(chosen));
+
+        // Then
+        assert_eq!(path, PathBuf::from(expected));
     }
 }
