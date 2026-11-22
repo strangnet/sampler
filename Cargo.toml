@@ -9,3 +9,9 @@ screencapturekit = { version = "1", features = ["macos_13_0"] }
 hound = "3.5"
 bytemuck = "1.21"
 rodio = { version = "0.20", default-features = false }
+
+[dev-dependencies]
+hound = "3.5"
+gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
+rstest = "0.28.0"
+tempfile = "3"

@@ -252,42 +252,65 @@ pub fn waveform_canvas(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn draw_x_range_respects_padding_and_minimum_width() {
-        let (start_x, draw_width) = draw_x_range(10.0, 208.0);
-        assert!((start_x - 14.0).abs() < 1e-6);
-        assert!((draw_width - 200.0).abs() < 1e-6);
+    #[track_caller]
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
 
-        let (narrow_start, narrow_width) = draw_x_range(5.0, 6.0);
-        assert!((narrow_start - 9.0).abs() < 1e-6);
-        assert!((narrow_width - 1.0).abs() < 1e-6);
+    #[rstest]
+    #[case::inset_by_the_padding(10.0, 208.0, (14.0, 200.0))]
+    #[case::at_least_one_pixel_wide(5.0, 6.0, (9.0, 1.0))]
+    fn the_drawing_area_sits_inside_the_padding(
+        #[case] origin_x: f32,
+        #[case] width: f32,
+        #[case] expected: (f32, f32),
+    ) {
+        // When
+        let (start_x, draw_width) = draw_x_range(origin_x, width);
+
+        // Then
+        assert_close(start_x, expected.0);
+        assert_close(draw_width, expected.1);
+    }
+
+    #[rstest]
+    #[case::a_reversed_selection_is_normalised((0.75, 0.25), (64.0, 164.0))]
+    #[case::a_selection_past_the_recording_is_clamped((-0.5, 1.5), (14.0, 214.0))]
+    fn a_selection_is_drawn_between_its_handles(
+        #[case] (a, b): (f32, f32),
+        #[case] expected: (f32, f32),
+    ) {
+        // When
+        let (x0, x1) = selection_x_bounds(14.0, 200.0, a, b);
+
+        // Then
+        assert_close(x0, expected.0);
+        assert_close(x1, expected.1);
+    }
+
+    #[rstest]
+    #[case::centred_on_its_position(0.5, 113.0)]
+    #[case::clamped_before_the_start(-0.5, 13.0)]
+    #[case::clamped_past_the_end(1.5, 213.0)]
+    fn the_playhead_is_drawn_at_its_position(#[case] pos: f32, #[case] expected: f32) {
+        // When
+        let x = playhead_x(10.0, 208.0, 14.0, 200.0, pos);
+
+        // Then
+        assert_close(x, expected);
     }
 
     #[test]
-    fn selection_x_bounds_normalizes_and_clamps() {
-        let (x0, x1) = selection_x_bounds(14.0, 200.0, 0.75, 0.25);
-        assert!((x0 - 64.0).abs() < 1e-6);
-        assert!((x1 - 164.0).abs() < 1e-6);
+    fn the_playhead_stays_inside_an_ultra_narrow_canvas() {
+        // Given: a 1 px drawing area that ends past the canvas's right edge
+        let (origin_x, width, start_x, draw_width) = (0.0, 5.0, 4.0, 1.0);
 
-        let (cx0, cx1) = selection_x_bounds(14.0, 200.0, -0.5, 1.5);
-        assert!((cx0 - 14.0).abs() < 1e-6);
-        assert!((cx1 - 214.0).abs() < 1e-6);
-    }
+        // When
+        let x = playhead_x(origin_x, width, start_x, draw_width, 1.0);
 
-    #[test]
-    fn playhead_x_centers_and_clamps_within_canvas() {
-        let mid = playhead_x(10.0, 208.0, 14.0, 200.0, 0.5);
-        assert!((mid - 113.0).abs() < 1e-6);
-
-        let left = playhead_x(10.0, 208.0, 14.0, 200.0, -0.5);
-        assert!((left - 13.0).abs() < 1e-6);
-
-        let right = playhead_x(10.0, 208.0, 14.0, 200.0, 1.5);
-        assert!((right - 213.0).abs() < 1e-6);
-
-        // When draw_width extends past right bound on ultra-narrow canvas, clamps to width - 2.
-        let clamped_right = playhead_x(0.0, 5.0, 4.0, 1.0, 1.0);
-        assert!((clamped_right - 3.0).abs() < 1e-6);
+        // Then
+        assert_close(x, 3.0);
     }
 }

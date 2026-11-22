@@ -36,6 +36,38 @@ impl AudioSource {
     }
 }
 
+/// What the app needs from audio capture (ScreenCaptureKit in production).
+pub trait Capture {
+    /// Running applications that can be chosen as a source.
+    fn running_apps(&self) -> Result<Vec<RunningAppInfo>, String>;
+    /// Clears `recording` and starts capturing `source` into it.
+    fn start(
+        &mut self,
+        recording: Arc<Mutex<AudioBufferState>>,
+        source: &AudioSource,
+    ) -> Result<(), String>;
+    fn stop(&mut self) -> Result<(), String>;
+    fn is_recording(&self) -> bool;
+}
+
+/// What the app needs from audio output (rodio in production).
+pub trait Playback {
+    /// Plays `samples`, the part of the Recording spanning `clip_range`
+    /// (normalized), repeating while `loop_enabled` is set.
+    fn play(
+        &self,
+        samples: Vec<f32>,
+        clip_range: (f32, f32),
+        loop_enabled: Arc<AtomicBool>,
+    ) -> Result<(), String>;
+    fn stop(&self);
+    fn is_playing(&self) -> bool;
+    /// Normalized position in the Recording while playing.
+    fn playhead_position(&self) -> Option<f32>;
+    /// The last playback error, cleared once taken.
+    fn take_error(&self) -> Option<String>;
+}
+
 pub fn list_running_apps() -> Result<Vec<RunningAppInfo>, String> {
     let content = SCShareableContent::get().map_err(|e| {
         format!("Failed to access screen/audio content (check Screen Recording permission): {e}")
@@ -132,7 +164,9 @@ impl AudioBufferState {
         self.live_level = 0.0;
     }
 
-    fn push_interleaved_stereo(&mut self, interleaved: &[f32]) {
+    /// Appends captured interleaved stereo samples and updates the
+    /// waveform peaks and live level.
+    pub fn push_interleaved_stereo(&mut self, interleaved: &[f32]) {
         if interleaved.is_empty() {
             return;
         }
@@ -254,12 +288,18 @@ impl AudioRecorder {
     pub fn new() -> Self {
         Self { stream: None }
     }
+}
 
-    pub fn is_recording(&self) -> bool {
+impl Capture for AudioRecorder {
+    fn running_apps(&self) -> Result<Vec<RunningAppInfo>, String> {
+        list_running_apps()
+    }
+
+    fn is_recording(&self) -> bool {
         self.stream.is_some()
     }
 
-    pub fn start(
+    fn start(
         &mut self,
         shared: Arc<Mutex<AudioBufferState>>,
         source: &AudioSource,
@@ -341,7 +381,7 @@ impl AudioRecorder {
         Ok(())
     }
 
-    pub fn stop(&mut self) -> Result<(), String> {
+    fn stop(&mut self) -> Result<(), String> {
         if let Some(stream) = self.stream.take() {
             stream
                 .stop_capture()
@@ -455,12 +495,14 @@ impl AudioPlayer {
             error: Arc::new(Mutex::new(None)),
         }
     }
+}
 
-    pub fn is_playing(&self) -> bool {
+impl Playback for AudioPlayer {
+    fn is_playing(&self) -> bool {
         self.is_playing.load(Ordering::Relaxed)
     }
 
-    pub fn playhead_position(&self) -> Option<f32> {
+    fn playhead_position(&self) -> Option<f32> {
         if !self.is_playing() {
             return None;
         }
@@ -468,11 +510,11 @@ impl AudioPlayer {
         pos.is_finite().then_some(pos)
     }
 
-    pub fn take_error(&self) -> Option<String> {
+    fn take_error(&self) -> Option<String> {
         self.error.lock().ok().and_then(|mut guard| guard.take())
     }
 
-    pub fn stop(&self) {
+    fn stop(&self) {
         if let Ok(mut guard) = self.current_stop.lock()
             && let Some(flag) = guard.take()
         {
@@ -483,7 +525,7 @@ impl AudioPlayer {
             .store(f32::NAN.to_bits(), Ordering::Relaxed);
     }
 
-    pub fn play(
+    fn play(
         &self,
         samples: Vec<f32>,
         clip_range: (f32, f32),
@@ -626,6 +668,16 @@ pub fn save_wav_with_options(path: &Path, samples: &[f32], normalize: bool) -> R
         return Err("No recorded audio to save".to_string());
     }
 
+    let file = std::fs::File::create(path).map_err(|e| format!("Failed to create WAV: {e}"))?;
+    write_wav(std::io::BufWriter::new(file), samples, normalize)
+}
+
+/// Encodes interleaved stereo samples as a 16-bit PCM WAV into `writer`.
+fn write_wav<W: std::io::Write + std::io::Seek>(
+    writer: W,
+    samples: &[f32],
+    normalize: bool,
+) -> Result<(), String> {
     let normalized_buf;
     let output_samples = if normalize {
         normalized_buf = {
@@ -646,7 +698,7 @@ pub fn save_wav_with_options(path: &Path, samples: &[f32], normalize: bool) -> R
     };
 
     let mut writer =
-        hound::WavWriter::create(path, spec).map_err(|e| format!("Failed to create WAV: {e}"))?;
+        hound::WavWriter::new(writer, spec).map_err(|e| format!("Failed to create WAV: {e}"))?;
 
     for &sample in output_samples {
         let clamped = sample.clamp(-1.0, 1.0);
@@ -694,303 +746,477 @@ pub fn quick_save_wav_in_dir(
     Ok(candidate)
 }
 
-pub fn quick_save_wav(samples: &[f32], normalize: bool) -> Result<PathBuf, String> {
-    if samples.is_empty() {
-        return Err("No recorded audio to save".to_string());
-    }
-
-    let dir = quick_save_dir()?;
+/// Quick-saves into `dir`, named after the current time.
+pub fn quick_save_wav(dir: &Path, samples: &[f32], normalize: bool) -> Result<PathBuf, String> {
     let unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    quick_save_wav_in_dir(&dir, unix_secs, samples, normalize)
+    quick_save_wav_in_dir(dir, unix_secs, samples, normalize)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    fn encode(samples: &[f32], normalize: bool) -> hound::WavReader<std::io::Cursor<Vec<u8>>> {
+        let mut wav = std::io::Cursor::new(Vec::new());
+        write_wav(&mut wav, samples, normalize).expect("writing to memory succeeds");
+        wav.set_position(0);
+        hound::WavReader::new(wav).expect("output is a valid WAV")
+    }
+
+    #[track_caller]
+    fn assert_close(actual: &[f32], expected: &[f32]) {
+        let close = actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(expected)
+                .all(|(a, e)| (a - e).abs() < 1e-6);
+        assert!(close, "{actual:?} is not close to {expected:?}");
+    }
+
+    /// Interleaved stereo frames where frame `i` is `(i, -i)`.
+    fn frames(range: std::ops::Range<usize>) -> Vec<f32> {
+        range.flat_map(|i| [i as f32, -(i as f32)]).collect()
+    }
+
+    fn decode(wav: hound::WavReader<std::io::Cursor<Vec<u8>>>) -> Vec<i16> {
+        wav.into_samples()
+            .collect::<Result<_, _>>()
+            .expect("every sample decodes")
+    }
 
     #[test]
-    fn peaks_and_duration_track_interleaved_stereo() {
+    fn every_256_frames_add_one_waveform_peak() {
+        // Given
         let mut state = AudioBufferState::default();
-        // 512 stereo frames (2 peak buckets of 256 frames each)
-        let mut samples = Vec::with_capacity(512 * 2);
-        for i in 0..512 {
-            let v = if i < 256 { 0.5_f32 } else { -0.25_f32 };
-            samples.push(v);
-            samples.push(v);
-        }
-        state.push_interleaved_stereo(&samples);
+        let mut recording = [0.5_f32, 0.5].repeat(256);
+        recording.extend([-0.25_f32, -0.25].repeat(256));
 
-        assert_eq!(state.frame_count(), 512);
-        assert_eq!(state.peaks.len(), 2);
-        assert!((state.peaks[0].0 - 0.5).abs() < 1e-6);
-        assert!((state.peaks[0].1 - 0.5).abs() < 1e-6);
-        assert!((state.peaks[1].0 - (-0.25)).abs() < 1e-6);
-        assert!((state.peaks[1].1 - (-0.25)).abs() < 1e-6);
-        assert!((state.duration_secs() - (512.0 / 48_000.0)).abs() < 1e-9);
+        // When
+        state.push_interleaved_stereo(&recording);
+
+        // Then
+        assert_eq!(state.peaks, vec![(0.5, 0.5), (-0.25, -0.25)]);
     }
 
     #[test]
-    fn save_wav_writes_valid_16bit_stereo_file() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("sampler_test_output.wav");
-        let samples = vec![0.0_f32, 0.5, -0.5, 1.0, -1.0, 0.25];
+    fn the_duration_counts_stereo_frames_at_48_khz() {
+        // Given
+        let mut state = AudioBufferState::default();
 
-        save_wav_with_options(&path, &samples, false)
-            .expect("save_wav_with_options should succeed");
+        // When
+        state.push_interleaved_stereo(&[0.0; 2 * 4_800]);
 
-        let reader = hound::WavReader::open(&path).expect("WavReader should open saved file");
-        let spec = reader.spec();
-        assert_eq!(spec.channels, 2);
-        assert_eq!(spec.sample_rate, 48_000);
-        assert_eq!(spec.bits_per_sample, 16);
-        assert_eq!(spec.sample_format, hound::SampleFormat::Int);
-
-        let read_samples: Vec<i16> = reader.into_samples::<i16>().map(|s| s.unwrap()).collect();
-        assert_eq!(read_samples.len(), samples.len());
-        assert_eq!(read_samples[3], i16::MAX);
-
-        let _ = std::fs::remove_file(&path);
+        // Then
+        assert_eq!(state.frame_count(), 4_800);
+        assert_eq!(state.duration_secs(), 0.1);
     }
 
     #[test]
-    fn extract_slice_handles_full_subrange_reversed_empty_and_alignment() {
-        // 10 stereo frames: frame i has values (i as f32, -(i as f32))
-        let mut samples = Vec::with_capacity(20);
-        for i in 0..10 {
-            samples.push(i as f32);
-            samples.push(-(i as f32));
-        }
+    fn wav_export_is_48_khz_stereo_16_bit_integer() {
+        // Given
+        let samples = [0.0_f32, 0.0];
 
-        // None returns full stereo clip
-        assert_eq!(extract_slice(&samples, None), samples);
-        assert_eq!(slice_frame_range(10, None), (0.0, 1.0));
+        // When
+        let wav = encode(&samples, false);
 
-        // Sub-range (0.2, 0.5) -> frames 2..5
-        let sub = extract_slice(&samples, Some((0.2, 0.5)));
-        assert_eq!(sub, vec![2.0, -2.0, 3.0, -3.0, 4.0, -4.0]);
-        assert_eq!(slice_frame_range(10, Some((0.2, 0.5))), (0.2, 0.5));
-
-        // Reversed (0.8, 0.2) -> frames 2..8
-        let rev = extract_slice(&samples, Some((0.8, 0.2)));
-        assert_eq!(rev.len(), 12);
-        assert_eq!(rev[0], 2.0);
-        assert_eq!(rev[11], -7.0);
-        assert_eq!(slice_frame_range(10, Some((0.8, 0.2))), (0.2, 0.8));
-
-        // Narrow non-degenerate range guarantees at least 1 stereo frame
-        let tiny = extract_slice(&samples, Some((0.0, 0.01)));
-        assert_eq!(tiny, vec![0.0, 0.0]);
-        assert_eq!(slice_frame_range(10, Some((0.0, 0.01))), (0.0, 0.1));
-
-        // Degenerate range falls back to full clip
-        assert_eq!(extract_slice(&samples, Some((0.5, 0.5))), samples);
-        assert_eq!(slice_frame_range(10, Some((0.5, 0.5))), (0.0, 1.0));
-
-        // Stereo frame alignment drops trailing odd sample
-        let unaligned = vec![0.1, -0.1, 0.2, -0.2, 0.3];
-        assert_eq!(extract_slice(&unaligned, None), vec![0.1, -0.1, 0.2, -0.2]);
-
-        // Empty input returns empty vec
-        assert!(extract_slice(&[], None).is_empty());
-        assert!(extract_slice(&[0.5], Some((0.0, 1.0))).is_empty());
-    }
-
-    #[test]
-    fn normalize_samples_scales_peak_and_preserves_silence() {
-        let mut signal = vec![0.1_f32, -0.25, 0.05, -0.125];
-        normalize_samples(&mut signal);
-        let peak = signal.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
-        assert!((peak - 0.9885).abs() < 1e-5);
-        assert!((signal[0] - (0.1 * 0.9885 / 0.25)).abs() < 1e-5);
-        assert!((signal[1] + 0.9885).abs() < 1e-5);
-
-        let mut silence = vec![0.0_f32, 0.0, -0.0, 1e-7];
-        let original = silence.clone();
-        normalize_samples(&mut silence);
-        assert_eq!(silence, original);
-    }
-
-    #[test]
-    fn format_timestamp_filename_formats_utc_correctly() {
-        assert_eq!(format_timestamp_filename(0), "sample-19700101-000000.wav");
+        // Then
         assert_eq!(
-            format_timestamp_filename(1_709_164_800),
-            "sample-20240229-000000.wav"
+            wav.spec(),
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            }
         );
+    }
+
+    #[rstest]
+    #[case::no_selection_is_the_whole_recording(None, 0..10)]
+    #[case::a_selection_covers_its_frames(Some((0.2, 0.5)), 2..5)]
+    #[case::a_reversed_selection_is_normalised(Some((0.8, 0.2)), 2..8)]
+    #[case::rounds_to_the_nearest_frame(Some((0.25, 0.75)), 3..8)]
+    #[case::a_narrow_selection_keeps_one_frame(Some((0.0, 0.01)), 0..1)]
+    #[case::the_very_end_still_holds_the_last_frame(Some((0.96, 1.0)), 9..10)]
+    #[case::a_zero_width_selection_is_the_whole_recording(Some((0.5, 0.5)), 0..10)]
+    #[case::an_infinite_end_is_the_whole_recording(Some((0.2, f32::INFINITY)), 0..10)]
+    fn a_selection_maps_to_whole_frames(
+        #[case] selection: Option<(f32, f32)>,
+        #[case] expected: std::ops::Range<usize>,
+    ) {
+        // Given
+        let recording = frames(0..10);
+
+        // When
+        let slice = extract_slice(&recording, selection);
+        let range = slice_frame_range(10, selection);
+
+        // Then
+        assert_eq!(slice, frames(expected.clone()));
         assert_eq!(
-            format_timestamp_filename(1_795_223_194),
-            "sample-20261121-010634.wav"
+            range,
+            (expected.start as f32 / 10.0, expected.end as f32 / 10.0)
         );
     }
 
     #[test]
-    fn save_wav_with_options_normalizes_without_mutating_input() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("sampler_test_normalized_output.wav");
-        let samples = vec![0.0_f32, 0.1, -0.2, 0.05, -0.1, 0.2];
-        let snapshot = samples.clone();
+    fn a_trailing_half_frame_is_dropped() {
+        // Given
+        let recording = [0.1_f32, -0.1, 0.2, -0.2, 0.3];
 
-        save_wav_with_options(&path, &samples, true).expect("save_wav_with_options should succeed");
+        // When
+        let slice = extract_slice(&recording, None);
 
-        assert_eq!(samples, snapshot);
+        // Then
+        assert_eq!(slice, vec![0.1, -0.1, 0.2, -0.2]);
+    }
 
-        let reader = hound::WavReader::open(&path).expect("WavReader should open saved file");
-        let read_samples: Vec<i16> = reader.into_samples::<i16>().map(|s| s.unwrap()).collect();
-        assert_eq!(read_samples.len(), samples.len());
+    #[rstest]
+    #[case::no_samples(&[], None)]
+    #[case::half_a_frame(&[0.5], Some((0.0, 1.0)))]
+    fn a_recording_without_a_whole_frame_slices_to_nothing(
+        #[case] recording: &[f32],
+        #[case] selection: Option<(f32, f32)>,
+    ) {
+        // When
+        let slice = extract_slice(recording, selection);
 
-        let expected_peak = (0.9885_f32 * i16::MAX as f32) as i16;
-        let max_pcm = read_samples.iter().map(|s| s.unsigned_abs()).max().unwrap();
-        assert!((max_pcm as i32 - expected_peak as i32).abs() <= 2);
-
-        let _ = std::fs::remove_file(&path);
+        // Then
+        assert_eq!(slice, Vec::<f32>::new());
     }
 
     #[test]
-    fn audio_source_label_and_player_idle_state() {
-        assert_eq!(AudioSource::default().label(), "All System Audio");
-        let app_source = AudioSource::Application(RunningAppInfo {
+    fn normalising_scales_the_peak_to_minus_0_1_dbfs() {
+        // Given
+        let mut samples = [0.1_f32, -0.25, 0.05, -0.125];
+
+        // When
+        normalize_samples(&mut samples);
+
+        // Then
+        assert_close(&samples, &[0.395_4, -0.9885, 0.197_7, -0.494_25]);
+    }
+
+    #[test]
+    fn normalising_leaves_near_silence_untouched() {
+        // Given
+        let mut samples = [0.0_f32, 0.0, -0.0, 1e-7];
+
+        // When
+        normalize_samples(&mut samples);
+
+        // Then
+        assert_eq!(samples, [0.0, 0.0, -0.0, 1e-7]);
+    }
+
+    #[rstest]
+    #[case::the_unix_epoch(0, "sample-19700101-000000.wav")]
+    #[case::a_leap_day(1_709_164_800, "sample-20240229-000000.wav")]
+    #[case::a_time_of_day(QUICK_SAVE_SECS, "sample-20261121-010634.wav")]
+    fn a_sample_file_is_named_after_its_utc_time(#[case] unix_secs: u64, #[case] expected: &str) {
+        // When
+        let name = format_timestamp_filename(unix_secs);
+
+        // Then
+        assert_eq!(name, expected);
+    }
+
+    #[test]
+    fn a_normalised_export_peaks_just_below_full_scale() {
+        // Given
+        let samples = [0.0_f32, 0.1, -0.2, 0.05, -0.1, 0.2];
+
+        // When
+        let decoded = decode(encode(&samples, true));
+
+        // Then
+        let peak = decoded.iter().map(|s| s.unsigned_abs()).max();
+        assert_eq!(peak, Some(32_390), "-0.1 dBFS of i16::MAX");
+    }
+
+    #[rstest]
+    #[case::the_default_is_all_system_audio(AudioSource::default(), "All System Audio")]
+    #[case::an_application_by_its_name(
+        AudioSource::Application(RunningAppInfo {
             pid: 42,
             name: "Music".to_string(),
             bundle_id: "com.apple.Music".to_string(),
-        });
-        assert_eq!(app_source.label(), "Music");
+        }),
+        "Music"
+    )]
+    fn a_source_is_labelled(#[case] source: AudioSource, #[case] expected: &str) {
+        // When
+        let label = source.label();
 
+        // Then
+        assert_eq!(label, expected);
+    }
+
+    #[test]
+    fn a_new_player_is_idle_with_no_playhead() {
+        // When
         let player = AudioPlayer::new();
-        assert!(!player.is_playing());
+
+        // Then
+        assert!(!player.is_playing(), "a new player is playing");
         assert_eq!(player.playhead_position(), None);
         assert_eq!(player.take_error(), None);
-
-        let loop_flag = Arc::new(AtomicBool::new(false));
-        assert!(player.play(Vec::new(), (0.0, 1.0), loop_flag).is_err());
     }
 
     #[test]
-    fn flush_partial_peak_commits_sub_bucket_and_resets_live_level() {
-        let mut state = AudioBufferState::default();
-        let mut samples = Vec::with_capacity(20 * 2);
-        for i in 0..20 {
-            let v = if i < 10 { 0.25_f32 } else { -0.5_f32 };
-            samples.push(v);
-            samples.push(v);
-        }
-        state.push_interleaved_stereo(&samples);
-
-        assert_eq!(state.frame_count(), 20);
-        assert!(state.peaks.is_empty());
-        assert!(state.live_level > 0.0);
-
-        state.flush_partial_peak();
-        assert_eq!(state.peaks.len(), 1);
-        assert!((state.peaks[0].0 - (-0.5)).abs() < 1e-6);
-        assert!((state.peaks[0].1 - 0.25).abs() < 1e-6);
-        assert_eq!(state.live_level, 0.0);
-
-        // Calling again when no partial bucket remains should not push an empty bucket.
-        state.flush_partial_peak();
-        assert_eq!(state.peaks.len(), 1);
-        assert_eq!(state.live_level, 0.0);
-    }
-
-    #[test]
-    fn bytes_to_f32_cow_decodes_aligned_and_unaligned_slices() {
-        let expected = [0.0_f32, -0.5, 0.25, 1.0, -0.875];
-        let payload: Vec<u8> = expected.iter().flat_map(|f| f.to_ne_bytes()).collect();
-
-        let mut aligned_words = vec![0_u32; expected.len() + 1];
-        let aligned_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut aligned_words);
-        aligned_bytes[..payload.len()].copy_from_slice(&payload);
-        aligned_bytes[payload.len()] = 0xAA;
-        aligned_bytes[payload.len() + 1] = 0xBB;
-
-        let aligned_cow = bytes_to_f32_cow(&aligned_bytes[..payload.len() + 2]);
-        assert!(matches!(aligned_cow, Cow::Borrowed(_)));
-        assert_eq!(aligned_cow.as_ref(), &expected);
-
-        let mut unaligned_words = vec![0_u32; expected.len() + 2];
-        let unaligned_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut unaligned_words);
-        unaligned_bytes[1..1 + payload.len()].copy_from_slice(&payload);
-        unaligned_bytes[1 + payload.len()] = 0xCC;
-        unaligned_bytes[1 + payload.len() + 1] = 0xDD;
-        unaligned_bytes[1 + payload.len() + 2] = 0xEE;
-
-        let unaligned_cow = bytes_to_f32_cow(&unaligned_bytes[1..1 + payload.len() + 3]);
-        assert!(matches!(unaligned_cow, Cow::Owned(_)));
-        assert_eq!(unaligned_cow.as_ref(), &expected);
-
-        assert!(bytes_to_f32_cow(&unaligned_bytes[1..4]).is_empty());
-        assert!(bytes_to_f32_cow(&[]).is_empty());
-    }
-
-    #[test]
-    fn quick_save_wav_in_dir_creates_dir_and_handles_collisions() {
-        struct TempDirGuard(PathBuf);
-        impl Drop for TempDirGuard {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let base_dir = std::env::temp_dir().join(format!(
-            "sampler_quick_save_test_{}_{}",
-            std::process::id(),
-            unique
-        ));
-        let _ = std::fs::remove_dir_all(&base_dir);
-        let _guard = TempDirGuard(base_dir.clone());
-
-        let nested_dir = base_dir.join("nested");
-        assert!(!nested_dir.exists());
-
-        let samples = vec![0.1_f32, -0.1, 0.2, -0.2];
-        let unix_secs = 1_795_223_194;
-
-        let p0 = quick_save_wav_in_dir(&nested_dir, unix_secs, &samples, false)
-            .expect("first quick_save_wav_in_dir should succeed");
-        assert!(nested_dir.exists());
-        assert_eq!(p0, nested_dir.join("sample-20261121-010634.wav"));
-        assert!(p0.exists());
-
-        let p1 = quick_save_wav_in_dir(&nested_dir, unix_secs, &samples, false)
-            .expect("second quick_save_wav_in_dir should append -1");
-        assert_eq!(p1, nested_dir.join("sample-20261121-010634-1.wav"));
-        assert!(p1.exists());
-
-        let p2 = quick_save_wav_in_dir(&nested_dir, unix_secs, &samples, true)
-            .expect("third quick_save_wav_in_dir should append -2");
-        assert_eq!(p2, nested_dir.join("sample-20261121-010634-2.wav"));
-        assert!(p2.exists());
-
-        let reader = hound::WavReader::open(&p0).expect("saved quick-save WAV should be readable");
-        assert_eq!(reader.spec().channels, 2);
-        assert_eq!(reader.spec().sample_rate, 48_000);
-    }
-
-    #[test]
-    fn audio_player_take_error_is_none_when_idle() {
+    fn playing_an_empty_recording_fails() {
+        // Given
         let player = AudioPlayer::new();
-        assert_eq!(player.take_error(), None);
 
-        if let Ok(mut guard) = player.error.lock() {
-            *guard = Some("Audio playback error: simulated".to_string());
-        }
-        assert_eq!(
-            player.take_error(),
-            Some("Audio playback error: simulated".to_string())
+        // When
+        let result = player.play(Vec::new(), (0.0, 1.0), Arc::new(AtomicBool::new(false)));
+
+        // Then
+        assert_eq!(result, Err("No audio recorded to play".to_string()));
+    }
+
+    #[test]
+    fn ending_a_recording_commits_the_partial_peak_and_silences_the_meter() {
+        // Given
+        let mut state = AudioBufferState::default();
+        let mut recording = [0.25_f32, 0.25].repeat(10);
+        recording.extend([-0.5_f32, -0.5].repeat(10));
+        state.push_interleaved_stereo(&recording);
+
+        // When
+        state.flush_partial_peak();
+
+        // Then
+        assert_eq!(state.peaks, vec![(-0.5, 0.25)]);
+        assert_eq!(state.live_level, 0.0);
+    }
+
+    #[test]
+    fn ending_a_recording_twice_adds_no_empty_peak() {
+        // Given
+        let mut state = AudioBufferState::default();
+        state.push_interleaved_stereo(&[0.25, 0.25]);
+        state.flush_partial_peak();
+
+        // When
+        state.flush_partial_peak();
+
+        // Then
+        assert_eq!(state.peaks, vec![(0.25, 0.25)]);
+    }
+
+    const DECODED: [f32; 5] = [0.0, -0.5, 0.25, 1.0, -0.875];
+
+    /// A 4-byte-aligned buffer holding `DECODED` as native-endian bytes,
+    /// `offset` bytes in and followed by `trailing` stray bytes, plus the
+    /// byte range covering them.
+    fn capture_buffer(offset: usize, trailing: usize) -> (Vec<u32>, std::ops::Range<usize>) {
+        let payload: Vec<u8> = DECODED.iter().flat_map(|f| f.to_ne_bytes()).collect();
+        let len = offset + payload.len() + trailing;
+        let mut words = vec![0_u32; len.div_ceil(4)];
+        let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut words);
+        bytes[offset..offset + payload.len()].copy_from_slice(&payload);
+        bytes[offset + payload.len()..len].fill(0xAA);
+        (words, offset..len)
+    }
+
+    #[test]
+    fn aligned_capture_bytes_decode_without_copying() {
+        // Given
+        let (words, range) = capture_buffer(0, 2);
+        let bytes: &[u8] = bytemuck::cast_slice(&words);
+
+        // When
+        let decoded = bytes_to_f32_cow(&bytes[range]);
+
+        // Then
+        assert!(
+            matches!(decoded, Cow::Borrowed(_)),
+            "aligned bytes were copied"
         );
-        assert_eq!(player.take_error(), None);
+        assert_eq!(decoded.as_ref(), &DECODED);
+    }
 
-        if let Ok(mut guard) = player.error.lock() {
-            *guard = Some("Audio playback error: stale".to_string());
-        }
-        let loop_flag = Arc::new(AtomicBool::new(false));
-        assert!(player.play(Vec::new(), (0.0, 1.0), loop_flag).is_err());
+    #[test]
+    fn misaligned_capture_bytes_decode_into_a_copy() {
+        // Given
+        let (words, range) = capture_buffer(1, 3);
+        let bytes: &[u8] = bytemuck::cast_slice(&words);
+
+        // When
+        let decoded = bytes_to_f32_cow(&bytes[range]);
+
+        // Then
+        assert!(
+            matches!(decoded, Cow::Owned(_)),
+            "misaligned bytes were borrowed"
+        );
+        assert_eq!(decoded.as_ref(), &DECODED);
+    }
+
+    #[rstest]
+    #[case::no_bytes(0)]
+    #[case::less_than_one_sample(3)]
+    fn fewer_than_four_capture_bytes_decode_to_nothing(#[case] len: usize) {
+        // Given
+        let bytes = [0xAA_u8; 3];
+
+        // When
+        let decoded = bytes_to_f32_cow(&bytes[..len]);
+
+        // Then
+        assert_eq!(decoded.as_ref(), &[] as &[f32]);
+    }
+
+    const QUICK_SAVE_SECS: u64 = 1_795_223_194; // 2026-11-21 01:06:34 UTC
+
+    #[test]
+    fn a_quick_save_is_named_after_its_time_in_a_newly_created_folder() {
+        // Given
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let folder = tmp.path().join("Sampler");
+
+        // When
+        let saved = quick_save_wav_in_dir(&folder, QUICK_SAVE_SECS, &[0.1, -0.1], false)
+            .expect("quick save succeeds");
+
+        // Then
+        assert_eq!(saved, folder.join("sample-20261121-010634.wav"));
+        assert!(saved.is_file(), "{} was not written", saved.display());
+    }
+
+    #[test]
+    fn quick_saves_in_the_same_second_get_numbered_suffixes() {
+        // Given
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let folder = tmp.path();
+        quick_save_wav_in_dir(folder, QUICK_SAVE_SECS, &[0.1, -0.1], false).expect("first save");
+
+        // When
+        let second = quick_save_wav_in_dir(folder, QUICK_SAVE_SECS, &[0.1, -0.1], false)
+            .expect("second save");
+        let third = quick_save_wav_in_dir(folder, QUICK_SAVE_SECS, &[0.1, -0.1], false)
+            .expect("third save");
+
+        // Then
+        assert_eq!(second, folder.join("sample-20261121-010634-1.wav"));
+        assert_eq!(third, folder.join("sample-20261121-010634-2.wav"));
+    }
+
+    /// `AudioPlayer` has no seam that makes rodio fail, so these tests plant
+    /// the error its playback thread would record.
+    fn player_with_error(message: &str) -> AudioPlayer {
+        let player = AudioPlayer::new();
+        *player.error.lock().expect("error lock") = Some(message.to_string());
+        player
+    }
+
+    #[test]
+    fn a_playback_error_is_reported_once() {
+        // Given
+        let player = player_with_error("Audio playback error: simulated");
+
+        // When
+        let first = player.take_error();
+        let second = player.take_error();
+
+        // Then
+        assert_eq!(first.as_deref(), Some("Audio playback error: simulated"));
+        assert_eq!(second, None);
+    }
+
+    #[test]
+    fn starting_playback_clears_a_stale_error() {
+        // Given
+        let player = player_with_error("Audio playback error: stale");
+
+        // When
+        let _ = player.play(Vec::new(), (0.0, 1.0), Arc::new(AtomicBool::new(false)));
+
+        // Then
         assert_eq!(player.take_error(), None);
+    }
+
+    #[test]
+    fn wav_export_writes_each_sample_as_16_bit_pcm() {
+        // Given
+        let samples = [0.0_f32, 0.5, -0.5, 1.0, -1.0, 0.25];
+
+        // When
+        let decoded = decode(encode(&samples, false));
+
+        // Then
+        assert_eq!(decoded, vec![0, 16383, -16383, 32767, -32767, 8191]);
+    }
+
+    #[test]
+    fn saving_an_empty_recording_is_refused() {
+        // Given
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("empty.wav");
+
+        // When
+        let result = save_wav_with_options(&path, &[], false);
+
+        // Then
+        assert_eq!(result, Err("No recorded audio to save".to_string()));
+        assert!(!path.exists(), "an empty WAV was written");
+    }
+
+    #[test]
+    fn quick_saving_an_empty_recording_is_refused_without_creating_the_folder() {
+        // Given
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let folder = tmp.path().join("Sampler");
+
+        // When
+        let result = quick_save_wav_in_dir(&folder, QUICK_SAVE_SECS, &[], false);
+
+        // Then
+        assert_eq!(result, Err("No recorded audio to save".to_string()));
+        assert!(!folder.exists(), "the quick-save folder was created");
+    }
+
+    #[test]
+    fn normalising_ignores_non_finite_samples() {
+        // Given
+        let mut samples = [0.25_f32, f32::INFINITY, -0.5];
+
+        // When
+        normalize_samples(&mut samples);
+
+        // Then
+        assert_eq!(samples, [0.494_25, f32::INFINITY, -0.9885]);
+    }
+
+    #[test]
+    fn waveform_peaks_follow_the_mix_of_both_channels() {
+        // Given
+        let mut state = AudioBufferState::default();
+        let opposite_channels = [0.5_f32, -0.5].repeat(256);
+
+        // When
+        state.push_interleaved_stereo(&opposite_channels);
+
+        // Then
+        assert_eq!(state.peaks, vec![(0.0, 0.0)]);
+    }
+
+    #[test]
+    fn the_live_level_moves_most_of_the_way_to_the_loudest_sample() {
+        // Given
+        let mut state = AudioBufferState::default();
+
+        // When
+        state.push_interleaved_stereo(&[0.5, -0.1]);
+        let after_one = state.live_level;
+        state.push_interleaved_stereo(&[0.5, -0.1]);
+
+        // Then
+        assert_close(&[after_one, state.live_level], &[0.3, 0.42]);
     }
 }
