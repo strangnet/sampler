@@ -8,7 +8,7 @@ Context7 IDs and version caveats per crate: see `docs/agents/dependencies.md`. g
 
 ## Specs
 
-When a grilling session settles a change, file the agreed spec as a GitHub issue before implementing, and reference `#N` in commits.
+After grilling, run `/to-spec` before `/implement #N`, even for single-session work, so the agreed spec lives in an issue. Reference `#N` in commits.
 
 ## Agent skills
 
