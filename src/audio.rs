@@ -36,6 +36,38 @@ impl AudioSource {
     }
 }
 
+/// What the app needs from audio capture (ScreenCaptureKit in production).
+pub trait Capture {
+    /// Running applications that can be chosen as a source.
+    fn running_apps(&self) -> Result<Vec<RunningAppInfo>, String>;
+    /// Clears `recording` and starts capturing `source` into it.
+    fn start(
+        &mut self,
+        recording: Arc<Mutex<AudioBufferState>>,
+        source: &AudioSource,
+    ) -> Result<(), String>;
+    fn stop(&mut self) -> Result<(), String>;
+    fn is_recording(&self) -> bool;
+}
+
+/// What the app needs from audio output (rodio in production).
+pub trait Playback {
+    /// Plays `samples`, the part of the Recording spanning `clip_range`
+    /// (normalized), repeating while `loop_enabled` is set.
+    fn play(
+        &self,
+        samples: Vec<f32>,
+        clip_range: (f32, f32),
+        loop_enabled: Arc<AtomicBool>,
+    ) -> Result<(), String>;
+    fn stop(&self);
+    fn is_playing(&self) -> bool;
+    /// Normalized position in the Recording while playing.
+    fn playhead_position(&self) -> Option<f32>;
+    /// The last playback error, cleared once taken.
+    fn take_error(&self) -> Option<String>;
+}
+
 pub fn list_running_apps() -> Result<Vec<RunningAppInfo>, String> {
     let content = SCShareableContent::get().map_err(|e| {
         format!("Failed to access screen/audio content (check Screen Recording permission): {e}")
@@ -132,7 +164,9 @@ impl AudioBufferState {
         self.live_level = 0.0;
     }
 
-    fn push_interleaved_stereo(&mut self, interleaved: &[f32]) {
+    /// Appends captured interleaved stereo samples and updates the
+    /// waveform peaks and live level.
+    pub fn push_interleaved_stereo(&mut self, interleaved: &[f32]) {
         if interleaved.is_empty() {
             return;
         }
@@ -254,12 +288,18 @@ impl AudioRecorder {
     pub fn new() -> Self {
         Self { stream: None }
     }
+}
 
-    pub fn is_recording(&self) -> bool {
+impl Capture for AudioRecorder {
+    fn running_apps(&self) -> Result<Vec<RunningAppInfo>, String> {
+        list_running_apps()
+    }
+
+    fn is_recording(&self) -> bool {
         self.stream.is_some()
     }
 
-    pub fn start(
+    fn start(
         &mut self,
         shared: Arc<Mutex<AudioBufferState>>,
         source: &AudioSource,
@@ -341,7 +381,7 @@ impl AudioRecorder {
         Ok(())
     }
 
-    pub fn stop(&mut self) -> Result<(), String> {
+    fn stop(&mut self) -> Result<(), String> {
         if let Some(stream) = self.stream.take() {
             stream
                 .stop_capture()
@@ -455,12 +495,14 @@ impl AudioPlayer {
             error: Arc::new(Mutex::new(None)),
         }
     }
+}
 
-    pub fn is_playing(&self) -> bool {
+impl Playback for AudioPlayer {
+    fn is_playing(&self) -> bool {
         self.is_playing.load(Ordering::Relaxed)
     }
 
-    pub fn playhead_position(&self) -> Option<f32> {
+    fn playhead_position(&self) -> Option<f32> {
         if !self.is_playing() {
             return None;
         }
@@ -468,11 +510,11 @@ impl AudioPlayer {
         pos.is_finite().then_some(pos)
     }
 
-    pub fn take_error(&self) -> Option<String> {
+    fn take_error(&self) -> Option<String> {
         self.error.lock().ok().and_then(|mut guard| guard.take())
     }
 
-    pub fn stop(&self) {
+    fn stop(&self) {
         if let Ok(mut guard) = self.current_stop.lock()
             && let Some(flag) = guard.take()
         {
@@ -483,7 +525,7 @@ impl AudioPlayer {
             .store(f32::NAN.to_bits(), Ordering::Relaxed);
     }
 
-    pub fn play(
+    fn play(
         &self,
         samples: Vec<f32>,
         clip_range: (f32, f32),
@@ -704,17 +746,13 @@ pub fn quick_save_wav_in_dir(
     Ok(candidate)
 }
 
-pub fn quick_save_wav(samples: &[f32], normalize: bool) -> Result<PathBuf, String> {
-    if samples.is_empty() {
-        return Err("No recorded audio to save".to_string());
-    }
-
-    let dir = quick_save_dir()?;
+/// Quick-saves into `dir`, named after the current time.
+pub fn quick_save_wav(dir: &Path, samples: &[f32], normalize: bool) -> Result<PathBuf, String> {
     let unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    quick_save_wav_in_dir(&dir, unix_secs, samples, normalize)
+    quick_save_wav_in_dir(dir, unix_secs, samples, normalize)
 }
 
 #[cfg(test)]
