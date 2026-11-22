@@ -85,10 +85,10 @@ fn file_name_or_default(path: &Path) -> &str {
 }
 
 fn default_save_directory() -> PathBuf {
-    if let Ok(sampler_dir) = quick_save_dir() {
-        if sampler_dir.is_dir() {
-            return sampler_dir;
-        }
+    if let Ok(sampler_dir) = quick_save_dir()
+        && sampler_dir.is_dir()
+    {
+        return sampler_dir;
     }
     if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
         let home_path = PathBuf::from(home);
@@ -145,10 +145,16 @@ fn pill_badge(px_h: f32, py_v: f32, bg: u32, text: u32) -> Div {
 }
 
 fn pill_btn(id: &'static str, enabled: bool, active: bool, text_hex: u32) -> Stateful<Div> {
-    let (bg, text) = enabled
-        .then_some((0x1e212d, text_hex))
-        .unwrap_or((0x181a22, 0x6b7280));
-    let border = (active && enabled).then_some(0x38bdf8).unwrap_or(0x2e3242);
+    let (bg, text) = if enabled {
+        (0x1e212d, text_hex)
+    } else {
+        (0x181a22, 0x6b7280)
+    };
+    let border = if active && enabled {
+        0x38bdf8
+    } else {
+        0x2e3242
+    };
     pill_badge(0.0, 5.0, bg, text)
         .id(id)
         .flex()
@@ -247,10 +253,10 @@ impl SamplerApp {
         if finished && self.status_message.as_ref().starts_with("Playing") {
             self.status_message = "Playback finished".into();
         }
-        if let Ok(state) = self.shared_audio.lock() {
-            if let Some(err) = &state.error {
-                self.status_message = err.clone().into();
-            }
+        if let Ok(state) = self.shared_audio.lock()
+            && let Some(err) = &state.error
+        {
+            self.status_message = err.clone().into();
         }
         if let Some(err) = self.player.take_error() {
             self.status_message = err.into();
@@ -656,9 +662,11 @@ impl SamplerApp {
                 let frac = (s1 - s0).max(0.0) as f64;
                 (frac > 0.0).then(|| format!("Sel {}", format_duration(frac * duration_secs)))
             });
-        let (dur_border, dur_text) = is_recording
-            .then_some((0xf43f5e, 0xfda4af))
-            .unwrap_or((0x2a2d3a, 0xe5e7eb));
+        let (dur_border, dur_text) = if is_recording {
+            (0xf43f5e, 0xfda4af)
+        } else {
+            (0x2a2d3a, 0xe5e7eb)
+        };
 
         let title = div()
             .text_lg()
@@ -704,8 +712,8 @@ impl SamplerApp {
     fn render_bar(&self, f: (bool, bool, bool, bool), cx: &mut Context<Self>) -> impl IntoElement {
         use Action::*;
         let (is_recording, is_playing, loop_active, can_act) = f;
-        let rec_label = is_recording.then_some("Stop").unwrap_or("Record");
-        let play_label = is_playing.then_some("Stop Play").unwrap_or("Play");
+        let rec_label = if is_recording { "Stop" } else { "Record" };
+        let play_label = if is_playing { "Stop Play" } else { "Play" };
         let (rt, lt, nt) = (
             ButtonTone::Danger {
                 active: is_recording,
@@ -768,11 +776,13 @@ impl Render for SamplerApp {
         let is_playing = self.player.is_playing();
         let loop_active = self.loop_enabled.load(Ordering::Relaxed);
         let (duration_secs, frame_count, live_level, has_audio) = self.audio_snapshot();
-        let meter_pct = is_recording
-            .then_some((live_level * 100.0).clamp(0.0, 100.0))
-            .unwrap_or(0.0);
+        let meter_pct = if is_recording {
+            (live_level * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
         let can_act = has_audio && !is_recording && !self.is_saving;
-        let wave_border = is_recording.then_some(0x4c1d2b).unwrap_or(0x262936);
+        let wave_border = if is_recording { 0x4c1d2b } else { 0x262936 };
         let hover_hit = can_act.then(|| self.hover_hit()).flatten();
         let drag_kind = self.drag.map(|d| d.kind());
         let cursor = match (drag_kind, hover_hit) {

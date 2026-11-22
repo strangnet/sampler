@@ -1,3 +1,15 @@
+## Checks
+
+`scripts/check.sh` runs fmt, clippy (`-D warnings`) and tests; the pre-commit hook and CI run it. Fresh clone: `git config core.hooksPath .githooks`.
+
+## gpui
+
+API gaps and gotchas (cursor, window events, paint-phase calls): see `docs/agents/gpui.md`.
+
+## Specs
+
+When a grilling session settles a change, file the agreed spec as a GitHub issue before implementing, and reference `#N` in commits.
+
 ## Agent skills
 
 ### Issue tracker

@@ -159,6 +159,10 @@ fn paint_selection_overlay(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat paint-geometry params, mirroring the other paint_* helpers"
+)]
 fn paint_playhead(
     window: &mut Window,
     origin_x: f32,

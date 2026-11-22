@@ -139,7 +139,7 @@ impl AudioBufferState {
         self.samples.extend_from_slice(interleaved);
 
         let mut chunk_peak: f32 = 0.0;
-        for frame in interleaved.chunks_exact(CHANNELS as usize) {
+        for frame in interleaved.as_chunks::<{ CHANNELS as usize }>().0 {
             let mono = 0.5 * (frame[0] + frame[1]);
             chunk_peak = chunk_peak.max(frame[0].abs()).max(frame[1].abs());
 
@@ -175,7 +175,9 @@ fn bytes_to_f32_cow(bytes: &[u8]) -> Cow<'_, [f32]> {
         Ok(floats) => Cow::Borrowed(floats),
         Err(_) => Cow::Owned(
             trimmed
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
                 .collect(),
         ),
@@ -230,10 +232,10 @@ impl SCStreamOutputTrait for AudioOutputHandler {
             }
         }
 
-        if !interleaved.is_empty() {
-            if let Ok(mut state) = self.shared.lock() {
-                state.push_interleaved_stereo(&interleaved);
-            }
+        if !interleaved.is_empty()
+            && let Ok(mut state) = self.shared.lock()
+        {
+            state.push_interleaved_stereo(&interleaved);
         }
     }
 }
@@ -471,10 +473,10 @@ impl AudioPlayer {
     }
 
     pub fn stop(&self) {
-        if let Ok(mut guard) = self.current_stop.lock() {
-            if let Some(flag) = guard.take() {
-                flag.store(true, Ordering::Relaxed);
-            }
+        if let Ok(mut guard) = self.current_stop.lock()
+            && let Some(flag) = guard.take()
+        {
+            flag.store(true, Ordering::Relaxed);
         }
         self.is_playing.store(false, Ordering::Relaxed);
         self.playhead_bits
