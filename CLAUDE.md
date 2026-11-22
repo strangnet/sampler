@@ -2,9 +2,9 @@
 
 `scripts/check.sh` runs fmt, clippy (`-D warnings`) and tests; the pre-commit hook and CI run it. Fresh clone: `git config core.hooksPath .githooks`.
 
-## gpui
+## Library docs
 
-API gaps and gotchas (cursor, window events, paint-phase calls): see `docs/agents/gpui.md`.
+Context7 IDs and version caveats per crate: see `docs/agents/dependencies.md`. gpui gotchas (cursor, window events, paint-phase calls): see `docs/agents/gpui.md`.
 
 ## Specs
 

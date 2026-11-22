@@ -1,12 +1,8 @@
 # gpui notes
 
-gpui (0.2.2) has thin docs; the source is the reference. Read it at:
+Behaviour of gpui 0.2.2 that its docs don't state. For API lookups and the source location, see `docs/agents/dependencies.md`.
 
-```
-~/.cargo/registry/src/index.crates.io-*/gpui-0.2.2/src
-```
-
-Key files: `window.rs` (window-level events, cursor, paint-phase APIs), `elements/div.rs` (element listeners), `platform.rs` (`CursorStyle` variants), `interactive.rs` (event types).
+Key source files: `window.rs` (window-level events, cursor, paint-phase APIs), `elements/div.rs` (element listeners), `platform.rs` (`CursorStyle` variants), `interactive.rs` (event types).
 
 ## Gotchas found the hard way
 
