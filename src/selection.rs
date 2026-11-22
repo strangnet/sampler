@@ -345,4 +345,19 @@ mod tests {
         assert_eq!(SelectionDrag::begin(sel, at(0.4)).dragged_handle(), None);
         assert_eq!(SelectionDrag::begin(sel, at(0.9)).dragged_handle(), None);
     }
+
+    #[test]
+    fn resizing_past_either_end_of_the_recording_stops_at_the_end() {
+        let mut drag = SelectionDrag::begin(Some((0.2, 0.6)), at(0.6));
+        assert_sel(drag.update(1.4), (0.2, 1.0));
+        assert_sel(drag.update(-0.3), (0.0, 0.2));
+        assert_sel(drag.finish(1.4), (0.2, 1.0));
+    }
+
+    #[test]
+    fn creating_from_the_padding_before_the_recording_starts_at_zero() {
+        // 3 px into the left padding, before the Recording starts.
+        let drag = SelectionDrag::begin(None, at(-0.003));
+        assert_sel(drag.finish(0.1), (0.0, 0.1));
+    }
 }
