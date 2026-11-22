@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use gpui::{Bounds, Pixels, Styled, Window, canvas, fill, point, px, rgb, rgba, size};
 
 use crate::audio::AudioBufferState;
+use crate::selection::{Handle, Selection};
 
 /// Horizontal padding inside the waveform canvas in logical pixels.
 pub const WAVEFORM_PAD_X: f32 = 4.0;
@@ -120,7 +121,8 @@ fn paint_selection_overlay(
     height: f32,
     start_x: f32,
     draw_width: f32,
-    (a, b): (f32, f32),
+    (a, b): Selection,
+    highlighted_handle: Option<Handle>,
 ) {
     if a.is_nan() || b.is_nan() {
         return;
@@ -137,14 +139,22 @@ fn paint_selection_overlay(
         ));
     }
 
-    let handle_color = rgb(0x7dd3fc);
-    for handle_x in [sel_x0, (sel_x1 - 2.0).max(sel_x0)] {
+    for (handle, handle_edge_x) in [(Handle::Start, sel_x0), (Handle::End, sel_x1)] {
+        let (handle_width, color) = if highlighted_handle == Some(handle) {
+            (4.0, rgb(0xe0f2fe))
+        } else {
+            (2.0, rgb(0x7dd3fc))
+        };
+        let handle_x = match handle {
+            Handle::Start => handle_edge_x,
+            Handle::End => (handle_edge_x - handle_width).max(sel_x0),
+        };
         window.paint_quad(fill(
             Bounds {
                 origin: point(px(handle_x), px(origin_y)),
-                size: size(px(2.0), px(height)),
+                size: size(px(handle_width), px(height)),
             },
-            handle_color,
+            color,
         ));
     }
 }
@@ -176,7 +186,8 @@ fn paint_playhead(
 pub fn waveform_canvas(
     shared_audio: Arc<Mutex<AudioBufferState>>,
     is_recording: bool,
-    selection: Option<(f32, f32)>,
+    selection: Option<Selection>,
+    highlighted_handle: Option<Handle>,
     playhead: Option<f32>,
     bounds_slot: Rc<Cell<Option<Bounds<Pixels>>>>,
 ) -> impl gpui::IntoElement {
@@ -212,7 +223,15 @@ pub fn waveform_canvas(
 
             if !is_recording {
                 if let Some(sel) = selection {
-                    paint_selection_overlay(window, origin_y, height, start_x, draw_width, sel);
+                    paint_selection_overlay(
+                        window,
+                        origin_y,
+                        height,
+                        start_x,
+                        draw_width,
+                        sel,
+                        highlighted_handle,
+                    );
                 }
 
                 if let Some(pos) = playhead {

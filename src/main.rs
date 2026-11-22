@@ -1,5 +1,6 @@
 mod audio;
 mod controls;
+mod selection;
 mod source_picker;
 mod waveform;
 
@@ -11,9 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    App, Application, Bounds, Context, Div, FocusHandle, FontWeight, KeyBinding, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful,
-    Task, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, CursorStyle, DispatchPhase, Div, FocusHandle, FontWeight,
+    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, SharedString, Stateful, Task, WeakEntity, Window, WindowBounds,
+    WindowOptions, actions, canvas, div, prelude::*, px, rgb, size,
 };
 
 use audio::{
@@ -22,6 +24,7 @@ use audio::{
     save_wav_with_options, slice_frame_range,
 };
 use controls::{ButtonTone, format_duration, level_meter, styled_button};
+use selection::{DragKind, Handle, Selection, SelectionDrag, SelectionHit, WaveformPos, hit_test};
 use source_picker::{reconcile_selected_source, render_source_dropdown};
 use waveform::{WAVEFORM_PAD_X, waveform_canvas};
 
@@ -40,10 +43,39 @@ enum Action {
 
 type ButtonSpec = (&'static str, &'static str, bool, ButtonTone, Action);
 
-fn pixel_x_to_norm(bounds: Bounds<Pixels>, x_px: f32) -> f32 {
+/// Maps a window x coordinate to an unclamped position on the drawn waveform.
+fn pixel_x_to_waveform_pos(bounds: Bounds<Pixels>, x_px: f32) -> WaveformPos {
     let start_x = f32::from(bounds.origin.x) + WAVEFORM_PAD_X;
-    let draw_width = (f32::from(bounds.size.width) - WAVEFORM_PAD_X * 2.0).max(1.0);
-    ((x_px - start_x) / draw_width).clamp(0.0, 1.0)
+    let width = (f32::from(bounds.size.width) - WAVEFORM_PAD_X * 2.0).max(1.0);
+    WaveformPos {
+        x: (x_px - start_x) / width,
+        width,
+    }
+}
+
+/// A paint-only element for window-wide pointer concerns: pins the cursor
+/// while a Selection drag is in progress (so buttons under the pointer don't
+/// override it) and clears the waveform hover when the pointer leaves the
+/// window.
+fn pointer_overlay(
+    app: WeakEntity<SamplerApp>,
+    drag_cursor: Option<CursorStyle>,
+) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            if let Some(style) = drag_cursor {
+                window.set_window_cursor_style(style);
+            }
+            window.on_mouse_event(move |_: &MouseExitEvent, phase, _window, cx| {
+                if phase == DispatchPhase::Bubble {
+                    let _ = app.update(cx, |t, cx| t.track_pointer(None, cx));
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
 }
 
 fn file_name_or_default(path: &Path) -> &str {
@@ -139,8 +171,10 @@ struct SamplerApp {
     available_apps: Vec<RunningAppInfo>,
     selected_source: AudioSource,
     source_menu_open: bool,
-    selection: Option<(f32, f32)>,
-    drag_anchor: Option<(f32, f32)>,
+    selection: Option<Selection>,
+    drag: Option<SelectionDrag>,
+    /// Pointer position while it is over the waveform.
+    hover: Option<WaveformPos>,
     waveform_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     loop_enabled: Arc<AtomicBool>,
     normalize_export: bool,
@@ -162,7 +196,8 @@ impl SamplerApp {
             selected_source: AudioSource::AllSystemAudio,
             source_menu_open: false,
             selection: None,
-            drag_anchor: None,
+            drag: None,
+            hover: None,
             waveform_bounds: Rc::new(Cell::new(None)),
             loop_enabled: Arc::new(AtomicBool::new(false)),
             normalize_export: false,
@@ -240,38 +275,55 @@ impl SamplerApp {
         self._refresh_task = Some(task);
     }
 
-    fn mouse_x_to_norm(&self, x_px: f32) -> Option<f32> {
-        self.waveform_bounds.get().map(|b| pixel_x_to_norm(b, x_px))
+    fn waveform_pos(&self, x_px: f32) -> Option<WaveformPos> {
+        self.waveform_bounds
+            .get()
+            .map(|b| pixel_x_to_waveform_pos(b, x_px))
     }
 
     fn start_waveform_drag(&mut self, x_px: f32, cx: &mut Context<Self>) {
         self.source_menu_open = false;
         if self.audio_snapshot().3 && !self.recorder.is_recording() && !self.is_saving {
-            self.drag_anchor = self.mouse_x_to_norm(x_px).map(|norm| (norm, x_px));
+            self.drag = self
+                .waveform_pos(x_px)
+                .map(|press| SelectionDrag::begin(self.selection, press));
         }
         cx.notify();
     }
 
-    fn drag_waveform(&mut self, x_px: f32, finish: bool, cx: &mut Context<Self>) {
-        let anchor = if finish {
-            self.drag_anchor.take()
-        } else {
-            self.drag_anchor
-        };
-        let Some((anchor_norm, anchor_x)) = anchor else {
+    fn update_drag(&mut self, x_px: f32, cx: &mut Context<Self>) {
+        let Some(at) = self.waveform_pos(x_px) else {
             return;
         };
-        if (x_px - anchor_x).abs() < 4.0 {
-            if finish {
-                self.selection = None;
-                cx.notify();
-            }
-        } else if let Some(norm) = self.mouse_x_to_norm(x_px) {
-            self.selection = Some((anchor_norm.min(norm), anchor_norm.max(norm)));
-            cx.notify();
-        } else if finish {
+        if let Some(drag) = &mut self.drag {
+            self.selection = drag.update(at.x);
             cx.notify();
         }
+    }
+
+    fn finish_drag(&mut self, x_px: f32, cx: &mut Context<Self>) {
+        if let Some(drag) = self.drag.take() {
+            if let Some(at) = self.waveform_pos(x_px) {
+                self.selection = drag.finish(at.x);
+            }
+            cx.notify();
+        }
+    }
+
+    /// Tracks the pointer over the waveform so hover cursors and handle
+    /// highlights follow it; re-renders only when what's under it changes.
+    fn track_pointer(&mut self, position: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        let before = self.hover_hit();
+        self.hover = position
+            .filter(|p| self.waveform_bounds.get().is_some_and(|b| b.contains(p)))
+            .and_then(|p| self.waveform_pos(f32::from(p.x)));
+        if self.hover_hit() != before {
+            cx.notify();
+        }
+    }
+
+    fn hover_hit(&self) -> Option<SelectionHit> {
+        self.hover.map(|at| hit_test(self.selection, at))
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -280,7 +332,7 @@ impl SamplerApp {
         } else if ev.keystroke.key == "escape" {
             self.source_menu_open = false;
             self.selection = None;
-            self.drag_anchor = None;
+            self.drag = None;
             cx.notify();
         }
     }
@@ -359,7 +411,7 @@ impl SamplerApp {
         {
             Ok(()) => {
                 self.selection = None;
-                self.drag_anchor = None;
+                self.drag = None;
                 format!("Recording {label}…")
             }
             Err(err) => err,
@@ -430,7 +482,7 @@ impl SamplerApp {
         self.player.stop();
         self.was_playing = false;
         self.selection = None;
-        self.drag_anchor = None;
+        self.drag = None;
         if let Ok(mut state) = self.shared_audio.lock() {
             state.clear();
         }
@@ -721,9 +773,25 @@ impl Render for SamplerApp {
             .unwrap_or(0.0);
         let can_act = has_audio && !is_recording && !self.is_saving;
         let wave_border = is_recording.then_some(0x4c1d2b).unwrap_or(0x262936);
+        let hover_hit = can_act.then(|| self.hover_hit()).flatten();
+        let drag_kind = self.drag.map(|d| d.kind());
+        let cursor = match (drag_kind, hover_hit) {
+            (Some(DragKind::Resize), _) | (None, Some(SelectionHit::Handle(_))) => {
+                CursorStyle::ResizeLeftRight
+            }
+            (Some(DragKind::Move), _) => CursorStyle::ClosedHand,
+            (None, Some(SelectionHit::Inside)) => CursorStyle::OpenHand,
+            _ => CursorStyle::Crosshair,
+        };
+        let highlighted_handle: Option<Handle> = match (self.drag, hover_hit) {
+            (Some(drag), _) => drag.dragged_handle(),
+            (None, Some(SelectionHit::Handle(handle))) => Some(handle),
+            _ => None,
+        };
+        let drag_cursor = self.drag.is_some().then_some(cursor);
 
         let on_up = |t: &mut Self, ev: &MouseUpEvent, _w: &mut Window, cx: &mut Context<Self>| {
-            t.drag_waveform(f32::from(ev.position.x), true, cx);
+            t.finish_drag(f32::from(ev.position.x), cx);
         };
         let waveform_panel = div()
             .relative()
@@ -734,7 +802,7 @@ impl Render for SamplerApp {
             .border_1()
             .border_color(rgb(wave_border))
             .overflow_hidden()
-            .when(can_act, |el| el.cursor_crosshair())
+            .when(can_act, |el| el.cursor(cursor))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|t, ev: &MouseDownEvent, _w, cx| {
@@ -745,6 +813,7 @@ impl Render for SamplerApp {
                 self.shared_audio.clone(),
                 is_recording,
                 self.selection,
+                highlighted_handle,
                 self.player.playhead_position(),
                 self.waveform_bounds.clone(),
             ))
@@ -785,12 +854,14 @@ impl Render for SamplerApp {
                 }),
             )
             .on_mouse_move(cx.listener(|t, ev: &MouseMoveEvent, _w, cx| {
-                t.drag_waveform(f32::from(ev.position.x), false, cx)
+                t.track_pointer(Some(ev.position), cx);
+                t.update_drag(f32::from(ev.position.x), cx)
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(on_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(on_up))
             .on_key_down(cx.listener(|t, ev: &KeyDownEvent, _w, cx| t.on_key(ev, cx)))
             .child(self.render_header((is_recording, duration_secs, frame_count, has_audio), cx))
+            .child(pointer_overlay(cx.entity().downgrade(), drag_cursor))
             .child(waveform_panel)
             .child(level_meter(meter_pct))
             .child(self.render_bar((is_recording, is_playing, loop_active, can_act), cx))
@@ -835,16 +906,18 @@ mod tests {
     use gpui::point;
 
     #[test]
-    fn pixel_x_to_norm_accounts_for_waveform_padding_and_clamps() {
+    fn pixel_x_to_waveform_pos_accounts_for_padding_without_clamping() {
         let bounds = Bounds {
             origin: point(px(20.0), px(80.0)),
             size: size(px(208.0), px(200.0)),
         };
-        assert!((pixel_x_to_norm(bounds, 24.0) - 0.0).abs() < 1e-6);
-        assert!((pixel_x_to_norm(bounds, 124.0) - 0.5).abs() < 1e-6);
-        assert!((pixel_x_to_norm(bounds, 224.0) - 1.0).abs() < 1e-6);
-        assert!((pixel_x_to_norm(bounds, 0.0) - 0.0).abs() < 1e-6);
-        assert!((pixel_x_to_norm(bounds, 500.0) - 1.0).abs() < 1e-6);
+        let x = |px_x| pixel_x_to_waveform_pos(bounds, px_x).x;
+        assert_eq!(pixel_x_to_waveform_pos(bounds, 24.0).width, 200.0);
+        assert!((x(24.0) - 0.0).abs() < 1e-6);
+        assert!((x(124.0) - 0.5).abs() < 1e-6);
+        assert!((x(224.0) - 1.0).abs() < 1e-6);
+        assert!((x(4.0) - -0.1).abs() < 1e-6);
+        assert!((x(264.0) - 1.2).abs() < 1e-6);
     }
 
     #[test]
