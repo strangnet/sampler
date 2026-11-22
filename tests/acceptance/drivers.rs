@@ -51,6 +51,8 @@ pub struct GpuiDriver<'a> {
     capture: StubCapture,
     playback: StubPlayback,
     save_folder: TempDir,
+    /// Where Quick Save should write, inside `save_folder`.
+    quick_save_dir: PathBuf,
 }
 
 impl<'a> GpuiDriver<'a> {
@@ -59,29 +61,28 @@ impl<'a> GpuiDriver<'a> {
         let capture = StubCapture::default();
         let playback = StubPlayback::default();
         let save_folder = tempfile::tempdir().expect("temp save folder");
+        let quick_save_dir = save_folder.path().join("Sampler");
         let backends = Backends {
             capture: Box::new(capture.clone()),
             playback: Box::new(playback.clone()),
-            quick_save_dir: save_folder.path().join("Sampler"),
+            quick_save_dir: quick_save_dir.clone(),
             save_dialog_dir: save_folder.path().to_path_buf(),
         };
         let (app, cx) = cx.add_window_view(|_, cx| SamplerApp::new(backends, cx));
-        // As at launch (main.rs): the app's view has keyboard focus.
-        cx.update(|window, cx| window.focus(app.read(cx).focus_handle()));
         Self {
             cx,
             app,
             capture,
             playback,
             save_folder,
+            quick_save_dir,
         }
     }
 }
 
 impl GpuiDriver<'_> {
     /// Clicks the element tagged `selector`, then lets the app settle.
-    fn click(&mut self, selector: &str) {
-        let selector: &'static str = Box::leak(selector.to_string().into_boxed_str());
+    fn click(&mut self, selector: &'static str) {
         let bounds = self
             .cx
             .debug_bounds(selector)
@@ -116,11 +117,14 @@ impl GpuiDriver<'_> {
         selection.map(|(a, b)| (f64::from(a) * length, f64::from(b) * length))
     }
 
-    /// The one WAV saved so far.
-    fn saved_wav(&self) -> Vec<f32> {
+    /// The one WAV saved so far, which must be in the quick-save folder.
+    fn quick_saved_wav(&self) -> Vec<f32> {
         match self.saved_files().as_slice() {
-            [path] => read_wav(path),
-            files => panic!("expected one saved WAV, found {files:?}"),
+            [path] if path.parent() == Some(self.quick_save_dir.as_path()) => read_wav(path),
+            files => panic!(
+                "expected one WAV in {}, found {files:?}",
+                self.quick_save_dir.display()
+            ),
         }
     }
 
@@ -143,7 +147,7 @@ impl GpuiDriver<'_> {
     }
 
     /// Reads what the app currently shows.
-    fn read<R>(&mut self, f: impl FnOnce(&SamplerApp) -> R) -> R {
+    fn read<R>(&self, f: impl FnOnce(&SamplerApp) -> R) -> R {
         self.app.read_with(&*self.cx, |app, _| f(app))
     }
 }
@@ -166,12 +170,12 @@ impl Driver for GpuiDriver<'_> {
 
     fn choose_source(&mut self, label: &str) {
         self.click("source-picker-btn");
-        self.click(&format!("source:{label}"));
+        // gpui looks elements up by `&'static str`; one small leak per test.
+        self.click(Box::leak(format!("source:{label}").into_boxed_str()));
     }
 
     fn record(&mut self, secs: f64) {
-        self.click("record-btn");
-        self.capture.deliver(secs);
+        self.start_recording_for(secs);
         self.click("record-btn");
     }
 
@@ -291,6 +295,14 @@ impl Driver for GpuiDriver<'_> {
         assert!(request.loops(), "playback isn't looping");
     }
 
+    fn confirm_playing_once(&mut self) {
+        let request = self.playback.now_playing().expect("nothing is playing");
+        assert!(
+            !request.loops(),
+            "playback is looping without Loop turned on"
+        );
+    }
+
     fn confirm_stopped(&mut self) {
         let playing = self
             .playback
@@ -299,26 +311,27 @@ impl Driver for GpuiDriver<'_> {
         assert_eq!(playing, None, "still playing");
     }
 
-    fn confirm_saved(&mut self, from: f64, to: f64) {
-        assert_span("the saved WAV", ramp_span(&self.saved_wav()), (from, to));
+    fn confirm_quick_saved(&mut self, from: f64, to: f64) {
+        let wav = self.quick_saved_wav();
+        assert_span("the quick-saved WAV", ramp_span(&wav), (from, to));
     }
 
-    fn confirm_saved_peak_dbfs(&mut self, dbfs: f64) {
+    fn confirm_quick_saved_peak_dbfs(&mut self, dbfs: f64) {
         let peak = self
-            .saved_wav()
+            .quick_saved_wav()
             .iter()
             .fold(0.0_f32, |peak, s| peak.max(s.abs()));
         let actual = 20.0 * f64::from(peak).log10();
         assert!(
             (actual - dbfs).abs() < 0.01,
-            "the saved WAV peaks at {actual:.3} dBFS, expected {dbfs} dBFS"
+            "the quick-saved WAV peaks at {actual:.3} dBFS, expected {dbfs} dBFS"
         );
     }
 
-    fn confirm_saved_file(&mut self, name: &str) {
+    fn confirm_file_holds(&mut self, name: &str, from: f64, to: f64) {
         let expected = self.save_folder.path().join(name);
         assert_eq!(self.saved_files(), vec![expected.clone()], "saved files");
-        read_wav(&expected);
+        assert_span(name, ramp_span(&read_wav(&expected)), (from, to));
     }
 
     fn confirm_nothing_saved(&mut self) {

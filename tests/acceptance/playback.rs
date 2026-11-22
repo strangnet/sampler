@@ -15,6 +15,7 @@ fn play_with_no_selection_plays_the_whole_recording(cx: &mut TestAppContext) {
 
     // Then
     dsl.playback().confirm_playing(0.0, 4.0);
+    dsl.playback().confirm_playing_once();
     dsl.status().confirm_says("Playing recorded sample…");
 }
 
@@ -40,7 +41,7 @@ fn loop_repeats_playback(cx: &mut TestAppContext) {
 
     // Given
     dsl.recording().records(2.0);
-    dsl.playback().turns_loop_on();
+    dsl.playback().presses_loop();
 
     // When
     dsl.playback().plays();

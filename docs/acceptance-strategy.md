@@ -29,7 +29,7 @@ Saving
 14. Quick Save with no Selection writes the whole Recording as a WAV.
 15. Quick Save with a Selection writes only the Selection.
 16. A normalised export peaks at −0.1 dBFS.
-17. Save WAV… writes to the chosen file and adds `.wav`.
+17. Save WAV… writes the Selection to the chosen file and adds `.wav`.
 18. Cancelling the Save dialog saves nothing.
 19. There's nothing to save before recording.
 
@@ -42,8 +42,8 @@ Times are seconds of the Recording.
 | `sources` | `app_is_running(name)`, `chooses(label)`, `app_quits(name)`, `refreshes()` | `confirm_chosen(label)`, `confirm_recorded_from(label)` |
 | `recording` | `records(secs)`, `in_progress_for(secs)`, `clears()` | `confirm_length(secs)`, `confirm_empty()` |
 | `selection` | `selects(from, to)`, `drags_end_handle_to(to)`, `drags_it_by(secs)`, `presses_escape()` | `confirm_spans(from, to)`, `confirm_none()` |
-| `playback` | `plays()`, `presses_space()`, `turns_loop_on()` | `confirm_playing(from, to)`, `confirm_looping()`, `confirm_stopped()`, `confirm_unavailable()` |
-| `saving` | `quick_saves()`, `turns_normalise_on()`, `saves_as(name)`, `cancels_save()` | `confirm_saved(from, to)`, `confirm_saved_file(name)`, `confirm_peak_dbfs(dbfs)`, `confirm_nothing_saved()`, `confirm_unavailable()` |
+| `playback` | `plays()`, `presses_space()`, `presses_loop()` | `confirm_playing(from, to)`, `confirm_playing_once()`, `confirm_looping()`, `confirm_stopped()`, `confirm_unavailable()` |
+| `saving` | `quick_saves()`, `presses_normalise()`, `saves_as(name)`, `cancels_save()` | `confirm_quick_saved(from, to)`, `confirm_quick_saved_peak_dbfs(dbfs)`, `confirm_file_holds(name, from, to)`, `confirm_nothing_saved()`, `confirm_unavailable()` |
 | `status` | (none) | `confirm_says(text)` |
 
 Scenario 8 runs as two tests, `space_starts_playback` and `space_stops_playback`, so each has a single When.

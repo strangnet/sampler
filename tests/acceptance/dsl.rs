@@ -37,11 +37,15 @@ pub trait Driver {
     fn confirm_no_selection(&mut self);
     fn confirm_playing(&mut self, from: f64, to: f64);
     fn confirm_looping(&mut self);
+    fn confirm_playing_once(&mut self);
     fn confirm_stopped(&mut self);
-    /// The one saved WAV holds the Recording from `from` to `to` seconds.
-    fn confirm_saved(&mut self, from: f64, to: f64);
-    fn confirm_saved_peak_dbfs(&mut self, dbfs: f64);
-    fn confirm_saved_file(&mut self, name: &str);
+    /// The one WAV saved, in the quick-save folder, holds the Recording
+    /// from `from` to `to` seconds.
+    fn confirm_quick_saved(&mut self, from: f64, to: f64);
+    fn confirm_quick_saved_peak_dbfs(&mut self, dbfs: f64);
+    /// `name` is the only file saved, and it holds the Recording from
+    /// `from` to `to` seconds.
+    fn confirm_file_holds(&mut self, name: &str, from: f64, to: f64);
     fn confirm_nothing_saved(&mut self);
     fn confirm_play_unavailable(&mut self);
     fn confirm_save_unavailable(&mut self);
@@ -178,7 +182,7 @@ impl Playback<'_, '_> {
         self.0.driver.press_space();
     }
 
-    pub fn turns_loop_on(self) {
+    pub fn presses_loop(self) {
         self.0.driver.press_loop();
     }
 
@@ -188,6 +192,10 @@ impl Playback<'_, '_> {
 
     pub fn confirm_looping(self) {
         self.0.driver.confirm_looping();
+    }
+
+    pub fn confirm_playing_once(self) {
+        self.0.driver.confirm_playing_once();
     }
 
     pub fn confirm_stopped(self) {
@@ -207,7 +215,7 @@ impl Saving<'_, '_> {
         self.0.driver.quick_save();
     }
 
-    pub fn turns_normalise_on(self) {
+    pub fn presses_normalise(self) {
         self.0.driver.press_normalize();
     }
 
@@ -219,16 +227,16 @@ impl Saving<'_, '_> {
         self.0.driver.cancel_save();
     }
 
-    pub fn confirm_saved(self, from: f64, to: f64) {
-        self.0.driver.confirm_saved(from, to);
+    pub fn confirm_quick_saved(self, from: f64, to: f64) {
+        self.0.driver.confirm_quick_saved(from, to);
     }
 
-    pub fn confirm_peak_dbfs(self, dbfs: f64) {
-        self.0.driver.confirm_saved_peak_dbfs(dbfs);
+    pub fn confirm_quick_saved_peak_dbfs(self, dbfs: f64) {
+        self.0.driver.confirm_quick_saved_peak_dbfs(dbfs);
     }
 
-    pub fn confirm_saved_file(self, name: &str) {
-        self.0.driver.confirm_saved_file(name);
+    pub fn confirm_file_holds(self, name: &str, from: f64, to: f64) {
+        self.0.driver.confirm_file_holds(name, from, to);
     }
 
     pub fn confirm_nothing_saved(self) {
