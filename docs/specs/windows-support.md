@@ -221,7 +221,7 @@ Checks other than tests:
 - [ ] **gpui 0.2.2 builds this app on `windows-latest` and runs it on Windows 11.** Test: the first slice's CI job, and `cargo run` on the user's PC.
 - [ ] **Process loopback with the tree included records a real app as 48 kHz f32, and excluding Sampler's tree records every other app.** Test: runbook steps 1–3.
 - [ ] **Loopback activates on a process that hasn't opened audio yet, and delivers once it plays.** Test: runbook step 1.
-- [ ] **A macOS Recording advances in real time during silence**, so padding on Windows is parity. Test: Mac runbook step 1. If it doesn't, this spec is revised before the silence slice.
+- [x] **A macOS Recording advances in real time during silence**, so padding on Windows is parity. Test: Mac runbook step 1. Confirmed in #19: recording a silent Finder for 5 s gave a 5 s Recording.
 - [ ] **No consent prompt blocks activation.** If one appears, the timeout turns it into a status message. Test: runbook step 1 on a fresh install.
 - [ ] **2 s is long enough for activation on a healthy machine.** Test: the runbook. If real activations are slow, a non-blocking `Capture` becomes its own spec.
 - [ ] **10 ms jitter tolerance is enough to avoid clicks.** Test: runbook steps 1–4.
