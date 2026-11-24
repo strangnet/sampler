@@ -6,10 +6,12 @@ license = "MIT"
 
 [dependencies]
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
-screencapturekit = { version = "1", features = ["macos_13_0"] }
 hound = "3.5"
-bytemuck = "1.21"
 rodio = { version = "0.20", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "1", features = ["macos_13_0"] }
+bytemuck = "1.21"
 
 [dev-dependencies]
 hound = "3.5"
