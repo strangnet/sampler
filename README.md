@@ -6,7 +6,7 @@ A macOS app for capturing audio from a running application (or the whole system)
 
 Built in Rust with [gpui](https://crates.io/crates/gpui) for the UI, [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit) for capture and [rodio](https://crates.io/crates/rodio) for playback.
 
-It was created to test a workflow of establishing good agentic development practices with the help of [Matt Pocock's](https://github.com/mattpocock/skills/) and [Addy Osmani's skills](https://github.com/addyosmani/agent-skills) and then adding a new feature incorporating acceptance tests with augmented AI development skills from https://github.com/strangnet/agent-skills/tree/0.2.1/skills/engineering.
+It was created to test a workflow of establishing good agentic development practices with the help of [Matt Pocock's](https://github.com/mattpocock/skills/) and [Addy Osmani's skills](https://github.com/addyosmani/agent-skills) and then adding a new feature incorporating acceptance tests with augmented AI development skills from https://github.com/strangnet/agent-skills/tree/0.2.1/skills/engineering. Those skills have since been merged into the `strangnet-skills` plugin, which the repo's workflow now uses (see [CLAUDE.md](CLAUDE.md)).
 
 ## Requirements
 

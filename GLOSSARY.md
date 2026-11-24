@@ -8,6 +8,10 @@ A macOS tool for capturing audio from a running application (or the whole system
 All audio captured into the buffer during one capture session.
 _Avoid_: Take, buffer, clip
 
+**Source**:
+What a Recording captures: All System Audio, or one running application.
+_Avoid_: Input, device, target, process
+
 **Selection**:
 A contiguous span of the Recording that Play and Save act on; with no Selection, they act on the whole Recording.
 _Avoid_: Region, crop, range
