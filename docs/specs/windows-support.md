@@ -225,7 +225,7 @@ Checks other than tests:
 - [ ] **No consent prompt blocks activation.** If one appears, the timeout turns it into a status message. Test: runbook step 1 on a fresh install.
 - [ ] **2 s is long enough for activation on a healthy machine.** Test: the runbook. If real activations are slow, a non-blocking `Capture` becomes its own spec.
 - [ ] **10 ms jitter tolerance is enough to avoid clicks.** Test: runbook steps 1–4.
-- [ ] **The whole acceptance suite passes on the hosted Windows runner.** Test: the first slice's CI job.
+- [x] **The whole acceptance suite passes on the hosted Windows runner.** Test: the first slice's CI job. Confirmed in #19: all 20 acceptance tests pass on `windows-latest`.
 
 ## Out of scope
 
