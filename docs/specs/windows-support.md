@@ -218,14 +218,14 @@ Checks other than tests:
 
 ## Assumptions
 
-- [ ] **gpui 0.2.2 builds this app on `windows-latest` and runs it on Windows 11.** Test: the first slice's CI job, and `cargo run` on the user's PC.
-- [ ] **Process loopback with the tree included records a real app as 48 kHz f32, and excluding Sampler's tree records every other app.** Test: runbook steps 1–3.
-- [ ] **Loopback activates on a process that hasn't opened audio yet, and delivers once it plays.** Test: runbook step 1.
-- [ ] **A macOS Recording advances in real time during silence**, so padding on Windows is parity. Test: Mac runbook step 1. If it doesn't, this spec is revised before the silence slice.
-- [ ] **No consent prompt blocks activation.** If one appears, the timeout turns it into a status message. Test: runbook step 1 on a fresh install.
-- [ ] **2 s is long enough for activation on a healthy machine.** Test: the runbook. If real activations are slow, a non-blocking `Capture` becomes its own spec.
+- [x] **gpui 0.2.2 builds this app on `windows-latest` and runs it on Windows 11.** Test: the first slice's CI job, and `cargo run` on the user's PC. Confirmed in #19: CI builds on `windows-latest`, and the app launched on the user's Windows 11 PC.
+- [x] **Process loopback with the tree included records a real app as 48 kHz f32, and excluding Sampler's tree records every other app.** Test: runbook steps 1–3. Confirmed in #19: steps 1–3 passed on the user's Windows 11 PC.
+- [x] **Loopback activates on a process that hasn't opened audio yet, and delivers once it plays.** Test: runbook step 1. Confirmed in #19: Record armed before Play recorded the app.
+- [x] **A macOS Recording advances in real time during silence**, so padding on Windows is parity. Test: Mac runbook step 1. Confirmed in #19: recording a silent Finder for 5 s gave a 5 s Recording.
+- [x] **No consent prompt blocks activation.** If one appears, the timeout turns it into a status message. Test: runbook step 1 on a fresh install. Confirmed in #19: the first run on the user's PC activated with no prompt.
+- [x] **2 s is long enough for activation on a healthy machine.** Test: the runbook. If real activations are slow, a non-blocking `Capture` becomes its own spec. Confirmed in #19: every activation in steps 1–3 succeeded within the timeout.
 - [ ] **10 ms jitter tolerance is enough to avoid clicks.** Test: runbook steps 1–4.
-- [ ] **The whole acceptance suite passes on the hosted Windows runner.** Test: the first slice's CI job.
+- [x] **The whole acceptance suite passes on the hosted Windows runner.** Test: the first slice's CI job. Confirmed in #19: all 20 acceptance tests pass on `windows-latest`.
 
 ## Out of scope
 

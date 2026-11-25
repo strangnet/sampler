@@ -7,12 +7,17 @@ on:
 
 jobs:
   check:
-    # ScreenCaptureKit only builds on macOS.
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # Git Bash on Windows; .gitattributes keeps the script's line endings LF.
       - run: scripts/check.sh
+        shell: bash
