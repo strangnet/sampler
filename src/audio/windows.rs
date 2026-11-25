@@ -349,4 +349,21 @@ mod tests {
         assert_eq!(samples, vec![0.25, -0.5]);
         assert_eq!(bytes.len(), 5, "the partial frame's bytes were not kept");
     }
+
+    #[test]
+    fn a_partial_frame_is_completed_by_the_next_packet() {
+        // Given: a whole frame plus the left sample and the first byte of the right one.
+        let right = (-0.125f32).to_le_bytes();
+        let mut bytes = le_bytes(&[0.25, -0.5, 0.75]);
+        bytes.push_back(right[0]);
+        drain_whole_frames(&mut bytes);
+
+        // When: the next packet brings the rest of the right sample.
+        bytes.extend(&right[1..]);
+        let samples = drain_whole_frames(&mut bytes);
+
+        // Then
+        assert_eq!(samples, vec![0.75, -0.125]);
+        assert!(bytes.is_empty(), "drained bytes were left behind");
+    }
 }
