@@ -16,6 +16,9 @@ mod unsupported;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use unsupported::AudioRecorder;
 
+#[cfg(any(target_os = "windows", test))]
+mod recording_time;
+
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 2;
 /// Number of stereo frames aggregated into each waveform peak bucket (~5.3 ms at 48 kHz).
