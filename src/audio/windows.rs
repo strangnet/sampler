@@ -18,6 +18,7 @@ use wasapi::{
     WaveFormat,
 };
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
@@ -27,6 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, PWSTR};
 
+use super::recording_time::RecordingTimePlacer;
 use super::{AudioBufferState, AudioSource, CHANNELS, Capture, RunningAppInfo, SAMPLE_RATE};
 
 /// How long Record waits for the capture thread to activate before giving up.
@@ -34,6 +36,7 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long the capture loop waits for a packet before checking for Stop.
 const PACKET_WAIT_MS: u32 = 100;
 const BYTES_PER_SAMPLE: usize = 4;
+const FRAME_BYTES: usize = BYTES_PER_SAMPLE * CHANNELS as usize;
 
 /// Apps with a visible top-level window, named by their exe file.
 fn list_running_apps() -> Vec<RunningAppInfo> {
@@ -262,9 +265,11 @@ fn capture_thread(
         let _ = ready.send(Err(format!("Could not start audio capture: {e}")));
         return;
     }
+    // Recording time starts here, when Record succeeds (INV-3).
+    let placer = RecordingTimePlacer::new(qpc_now());
     let _ = ready.send(Ok(()));
 
-    if let Err(e) = capture_loop(&stream, &shared, &stop)
+    if let Err(e) = capture_loop(&stream, &shared, &stop, placer)
         && let Ok(mut state) = shared.lock()
     {
         state.error = Some(format!("Audio stream error: {e}"));
@@ -272,40 +277,72 @@ fn capture_thread(
     let _ = stream.client.stop_stream();
 }
 
-/// Moves packets into the Recording until Stop. WASAPI sends nothing while
-/// the Source is silent, so a wait that times out just means silence.
+/// Moves packets into the Recording until Stop, placed on Recording time.
+/// WASAPI sends nothing while the Source is silent, so a wait that times out
+/// means silence, and so does the time from the last packet to Stop.
 fn capture_loop(
     stream: &Stream,
     shared: &Mutex<AudioBufferState>,
     stop: &AtomicBool,
+    mut placer: RecordingTimePlacer,
 ) -> Result<(), WasapiError> {
     let mut bytes: VecDeque<u8> = VecDeque::new();
     while !stop.load(Ordering::Acquire) {
         match stream.event.wait_for_event(PACKET_WAIT_MS) {
             Ok(()) => {}
-            Err(WasapiError::EventTimeout) => continue,
+            Err(WasapiError::EventTimeout) => {
+                write(shared, placer.fill_until(qpc_now()), &[]);
+                continue;
+            }
             Err(e) => return Err(e),
         }
 
         while stream.capture.get_next_packet_size()?.unwrap_or(0) > 0 {
-            stream.capture.read_from_device_to_deque(&mut bytes)?;
-        }
-
-        let samples = drain_whole_frames(&mut bytes);
-        if !samples.is_empty()
-            && let Ok(mut state) = shared.lock()
-        {
-            state.push_interleaved_stereo(&samples);
+            let before = bytes.len();
+            let info = stream.capture.read_from_device_to_deque(&mut bytes)?;
+            let frames = (bytes.len() - before) / FRAME_BYTES;
+            // The placer appends a packet stamped before the start directly,
+            // so a packet without a trustworthy timestamp is stamped 0.
+            let at = if info.flags.timestamp_error {
+                0
+            } else {
+                info.timestamp
+            };
+            let zeros = placer.place_packet(at, frames);
+            write(shared, zeros, &drain_whole_frames(&mut bytes));
         }
     }
+    write(shared, placer.fill_until(qpc_now()), &[]);
     Ok(())
+}
+
+/// Appends `zeros` frames of silence, then `samples`, to the Recording.
+fn write(shared: &Mutex<AudioBufferState>, zeros: usize, samples: &[f32]) {
+    if zeros == 0 && samples.is_empty() {
+        return;
+    }
+    if let Ok(mut state) = shared.lock() {
+        state.push_interleaved_stereo(&vec![0.0; zeros * CHANNELS as usize]);
+        state.push_interleaved_stereo(samples);
+    }
+}
+
+/// The performance counter in 100 ns ticks: the clock WASAPI stamps packets
+/// with (`IAudioCaptureClient::GetBuffer`'s QPC position).
+fn qpc_now() -> u64 {
+    let (mut count, mut frequency) = (0i64, 0i64);
+    // Both calls always succeed on Windows XP and later.
+    unsafe {
+        let _ = QueryPerformanceCounter(&mut count);
+        let _ = QueryPerformanceFrequency(&mut frequency);
+    }
+    (count as u128 * 10_000_000 / frequency.max(1) as u128) as u64
 }
 
 /// Takes every whole stereo frame of little-endian f32 samples off the front
 /// of `bytes`, leaving any partial frame for the next packet.
 fn drain_whole_frames(bytes: &mut VecDeque<u8>) -> Vec<f32> {
-    let frame_bytes = BYTES_PER_SAMPLE * CHANNELS as usize;
-    let whole = bytes.len() - bytes.len() % frame_bytes;
+    let whole = bytes.len() - bytes.len() % FRAME_BYTES;
     let taken: Vec<u8> = bytes.drain(..whole).collect();
     taken
         .as_chunks::<BYTES_PER_SAMPLE>()
